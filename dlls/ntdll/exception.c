@@ -19,6 +19,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include "config.h"
+#include "wine/port.h"
+
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
@@ -102,6 +105,77 @@ static ULONG remove_vectored_handler( struct list *handler_list, VECTORED_HANDLE
 
 
 /**********************************************************************
+ *           wait_suspend
+ *
+ * Wait until the thread is no longer suspended.
+ */
+void wait_suspend( CONTEXT *context )
+{
+    int saved_errno = errno;
+
+    /* wait with 0 timeout, will only return once the thread is no longer suspended */
+    server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, context, NULL, NULL );
+
+    errno = saved_errno;
+}
+
+
+/**********************************************************************
+ *           send_debug_event
+ *
+ * Send an EXCEPTION_DEBUG_EVENT event to the debugger.
+ */
+NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, int first_chance, CONTEXT *context )
+{
+    NTSTATUS ret;
+    DWORD i;
+    obj_handle_t handle = 0;
+    client_ptr_t params[EXCEPTION_MAXIMUM_PARAMETERS];
+    CONTEXT exception_context = *context;
+    select_op_t select_op;
+    sigset_t old_set;
+
+    if (!NtCurrentTeb()->Peb->BeingDebugged) return 0;  /* no debugger present */
+
+    pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+
+    for (i = 0; i < min( rec->NumberParameters, EXCEPTION_MAXIMUM_PARAMETERS ); i++)
+        params[i] = rec->ExceptionInformation[i];
+
+    SERVER_START_REQ( queue_exception_event )
+    {
+        req->first   = first_chance;
+        req->code    = rec->ExceptionCode;
+        req->flags   = rec->ExceptionFlags;
+        req->record  = wine_server_client_ptr( rec->ExceptionRecord );
+        req->address = wine_server_client_ptr( rec->ExceptionAddress );
+        req->len     = i * sizeof(params[0]);
+        wine_server_add_data( req, params, req->len );
+        if (!(ret = wine_server_call( req ))) handle = reply->handle;
+    }
+    SERVER_END_REQ;
+
+    if (handle)
+    {
+        select_op.wait.op = SELECT_WAIT;
+        select_op.wait.handles[0] = handle;
+        server_select( &select_op, offsetof( select_op_t, wait.handles[1] ), SELECT_INTERRUPTIBLE, TIMEOUT_INFINITE, &exception_context, NULL, NULL );
+
+        SERVER_START_REQ( get_exception_status )
+        {
+            req->handle = handle;
+            ret = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        if (ret >= 0) *context = exception_context;
+    }
+
+    pthread_sigmask( SIG_SETMASK, &old_set, NULL );
+    return ret;
+}
+
+
+/**********************************************************************
  *           call_vectored_handlers
  *
  * Call the vectored handlers chain.
@@ -173,16 +247,6 @@ void raise_status( NTSTATUS status, EXCEPTION_RECORD *rec )
 void WINAPI RtlRaiseStatus( NTSTATUS status )
 {
     raise_status( status, NULL );
-}
-
-
-/*******************************************************************
- *		KiRaiseUserExceptionDispatcher  (NTDLL.@)
- */
-void WINAPI KiRaiseUserExceptionDispatcher(void)
-{
-    EXCEPTION_RECORD rec = { NtCurrentTeb()->ExceptionCode };
-    RtlRaiseException( &rec );
 }
 
 
@@ -578,17 +642,6 @@ PRUNTIME_FUNCTION WINAPI RtlLookupFunctionEntry( ULONG_PTR pc, ULONG_PTR *base,
 }
 
 #endif  /* __x86_64__ || __arm__ || __aarch64__ */
-
-
-/*************************************************************
- *            _assert
- */
-void __cdecl _assert( const char *str, const char *file, unsigned int line )
-{
-    ERR( "%s:%u: Assertion failed %s\n", file, line, debugstr_a(str) );
-    RtlRaiseStatus( EXCEPTION_WINE_ASSERTION );
-}
-
 
 /*************************************************************
  *            __wine_spec_unimplemented_stub
