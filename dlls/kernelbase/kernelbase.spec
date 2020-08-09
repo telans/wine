@@ -1770,3 +1770,4 @@
 @ stdcall lstrlenW(wstr) KERNELBASE_lstrlenW
 # @ stub time
 # @ stub wprintf
+@ cdecl wine_hlocal_hashtable_find_unlocked(ptr)

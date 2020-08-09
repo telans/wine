@@ -656,6 +656,7 @@ static void symt_fill_sym_info(struct module_pair* pair,
                 case VT_I4:  sym_info->Value = (ULONG)data->u.value.n1.n2.n3.lVal; break;
                 case VT_I2:  sym_info->Value = (ULONG)(LONG_PTR)data->u.value.n1.n2.n3.iVal; break;
                 case VT_I1:  sym_info->Value = (ULONG)(LONG_PTR)data->u.value.n1.n2.n3.cVal; break;
+                case VT_UI8: sym_info->Value = (ULONG64)data->u.value.n1.n2.n3.ullVal;  break;
                 case VT_UI4: sym_info->Value = (ULONG)data->u.value.n1.n2.n3.ulVal; break;
                 case VT_UI2: sym_info->Value = (ULONG)data->u.value.n1.n2.n3.uiVal; break;
                 case VT_UI1: sym_info->Value = (ULONG)data->u.value.n1.n2.n3.bVal; break;
@@ -704,8 +705,16 @@ static void symt_fill_sym_info(struct module_pair* pair,
                                                        sym_info->MaxNameLen, UNDNAME_NAME_ONLY)) == 0))
         {
             sym_info->NameLen = min(strlen(name), sym_info->MaxNameLen - 1);
-            memcpy(sym_info->Name, name, sym_info->NameLen);
-            sym_info->Name[sym_info->NameLen] = '\0';
+            if(memcmp(name, "MSVCRT_", 7) == 0) {
+                memcpy(sym_info->Name, name + 7, sym_info->NameLen -6);
+                sym_info->Name[sym_info->NameLen -6] = '\0';
+                /*HACK HACK HACK HACK VERY DIRTY HACK */
+                
+            }
+            else {
+                memcpy(sym_info->Name, name, sym_info->NameLen);
+                sym_info->Name[sym_info->NameLen] = '\0';
+            }
         }
     }
     TRACE_(dbghelp_symt)("%p => %s %u %s\n",
