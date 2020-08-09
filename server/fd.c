@@ -103,6 +103,7 @@
 #include "process.h"
 #include "request.h"
 #include "esync.h"
+#include "fsync.h"
 
 #include "winternl.h"
 #include "winioctl.h"
@@ -203,6 +204,7 @@ struct fd
     apc_param_t          comp_key;    /* completion key to set in completion events */
     unsigned int         comp_flags;  /* completion flags */
     int                  esync_fd;    /* esync file descriptor */
+    unsigned int         fsync_idx;   /* fsync shm index */
 };
 
 static void fd_dump( struct object *obj, int verbose );
@@ -217,6 +219,7 @@ static const struct object_ops fd_ops =
     NULL,                     /* remove_queue */
     NULL,                     /* signaled */
     NULL,                     /* get_esync_fd */
+    NULL,                     /* get_fsync_idx */
     NULL,                     /* satisfied */
     no_signal,                /* signal */
     no_get_fd,                /* get_fd */
@@ -259,6 +262,7 @@ static const struct object_ops device_ops =
     NULL,                     /* remove_queue */
     NULL,                     /* signaled */
     NULL,                     /* get_esync_fd */
+    NULL,                     /* get_fsync_idx */
     NULL,                     /* satisfied */
     no_signal,                /* signal */
     no_get_fd,                /* get_fd */
@@ -300,6 +304,7 @@ static const struct object_ops inode_ops =
     NULL,                     /* remove_queue */
     NULL,                     /* signaled */
     NULL,                     /* get_esync_fd */
+    NULL,                     /* get_fsync_idx */
     NULL,                     /* satisfied */
     no_signal,                /* signal */
     no_get_fd,                /* get_fd */
@@ -343,6 +348,7 @@ static const struct object_ops file_lock_ops =
     remove_queue,               /* remove_queue */
     file_lock_signaled,         /* signaled */
     NULL,                       /* get_esync_fd */
+    NULL,                       /* get_fsync_idx */
     no_satisfied,               /* satisfied */
     no_signal,                  /* signal */
     no_get_fd,                  /* get_fd */
@@ -1706,6 +1712,7 @@ static struct fd *alloc_fd_object(void)
     fd->completion = NULL;
     fd->comp_flags = 0;
     fd->esync_fd   = -1;
+    fd->fsync_idx  = 0;
     init_async_queue( &fd->read_q );
     init_async_queue( &fd->write_q );
     init_async_queue( &fd->wait_q );
@@ -1714,6 +1721,9 @@ static struct fd *alloc_fd_object(void)
 
     if (do_esync())
         fd->esync_fd = esync_create_fd( 1, 0 );
+
+    if (do_fsync())
+        fd->fsync_idx = fsync_alloc_shm( 1, 0 );
 
     if ((fd->poll_index = add_poll_user( fd )) == -1)
     {
@@ -1747,14 +1757,19 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     fd->comp_flags = 0;
     fd->no_fd_status = STATUS_BAD_DEVICE_TYPE;
     fd->esync_fd   = -1;
+    fd->fsync_idx  = 0;
     init_async_queue( &fd->read_q );
     init_async_queue( &fd->write_q );
     init_async_queue( &fd->wait_q );
     list_init( &fd->inode_entry );
     list_init( &fd->locks );
 
+    if (do_fsync())
+        fd->fsync_idx = fsync_alloc_shm( 0, 0 );
+
     if (do_esync())
         fd->esync_fd = esync_create_fd( 0, 0 );
+
     return fd;
 }
 
@@ -2120,6 +2135,45 @@ struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops, int unix_fd, s
     return NULL;
 }
 
+void set_unix_name_of_fd( struct fd *fd, const struct stat *fd_st )
+{
+#ifdef __linux__
+    static const char procfs_fmt[] = "/proc/self/fd/%d";
+
+    char path[PATH_MAX], procfs_path[sizeof(procfs_fmt) - 2 /* %d */ + 11];
+    struct stat path_st;
+    ssize_t len;
+
+    sprintf( procfs_path, procfs_fmt, fd->unix_fd );
+    len = readlink( procfs_path, path, sizeof(path) );
+    if (len == -1 || len >= sizeof(path) )
+        return;
+    path[len] = '\0';
+
+    /* Make sure it's an absolute path, has at least one hardlink, and the same inode */
+    if (path[0] != '/' || stat( path, &path_st ) || path_st.st_nlink < 1 ||
+        path_st.st_dev != fd_st->st_dev || path_st.st_ino != fd_st->st_ino)
+        return;
+
+    if (!(fd->unix_name = mem_alloc( len + 1 )))
+        return;
+    memcpy( fd->unix_name, path, len + 1 );
+
+#elif defined(F_GETPATH)
+    char path[PATH_MAX];
+    size_t size;
+
+    if (fcntl( fd->unix_fd, F_GETPATH, path ) == -1 || path[0] != '/')
+        return;
+
+    size = strlen(path) + 1;
+    if (!(fd->unix_name = mem_alloc( size )))
+        return;
+    memcpy( fd->unix_name, path, size );
+
+#endif
+}
+
 /* retrieve the object that is using an fd */
 void *get_fd_user( struct fd *fd )
 {
@@ -2170,6 +2224,9 @@ void set_fd_signaled( struct fd *fd, int signaled )
     fd->signaled = signaled;
     if (signaled) wake_up( fd->user, 0 );
 
+    if (do_fsync() && !signaled)
+        fsync_clear( fd->user );
+
     if (do_esync() && !signaled)
         esync_clear( fd->esync_fd );
 }
@@ -2214,6 +2271,15 @@ int default_fd_get_esync_fd( struct object *obj, enum esync_type *type )
     struct fd *fd = get_obj_fd( obj );
     int ret = fd->esync_fd;
     *type = ESYNC_MANUAL_SERVER;
+    release_object( fd );
+    return ret;
+}
+
+unsigned int default_fd_get_fsync_idx( struct object *obj, enum fsync_type *type )
+{
+    struct fd *fd = get_obj_fd( obj );
+    unsigned int ret = fd->fsync_idx;
+    *type = FSYNC_MANUAL_SERVER;
     release_object( fd );
     return ret;
 }
