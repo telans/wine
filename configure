@@ -1661,6 +1661,7 @@ enable_wimgapi
 enable_win32k_sys
 enable_windowscodecs
 enable_windowscodecsext
+enable_windows_gaming_input
 enable_winealsa_drv
 enable_wineandroid_drv
 enable_winebus_sys
@@ -21654,14 +21655,6 @@ wine_fn_config_makefile dlls/ntoskrnl.exe enable_ntoskrnl_exe
 wine_fn_config_makefile dlls/ntoskrnl.exe/tests enable_tests
 wine_fn_config_makefile dlls/ntprint enable_ntprint
 wine_fn_config_makefile dlls/ntprint/tests enable_tests
-wine_fn_config_makefile dlls/nvapi enable_win32
-wine_fn_config_makefile dlls/nvapi/tests enable_tests
-wine_fn_config_makefile dlls/nvapi64 enable_win64
-wine_fn_config_makefile dlls/nvcuda enable_nvcuda
-wine_fn_config_makefile dlls/nvcuda/tests enable_tests
-wine_fn_config_makefile dlls/nvcuvid enable_nvcuvid
-wine_fn_config_makefile dlls/nvencodeapi enable_win32
-wine_fn_config_makefile dlls/nvencodeapi64 enable_win64
 wine_fn_config_makefile dlls/objsel enable_objsel
 wine_fn_config_makefile dlls/odbc32 enable_odbc32
 wine_fn_config_makefile dlls/odbcbcp enable_odbcbcp
@@ -21902,6 +21895,7 @@ wine_fn_config_makefile dlls/windowscodecs enable_windowscodecs
 wine_fn_config_makefile dlls/windowscodecs/tests enable_tests
 wine_fn_config_makefile dlls/windowscodecsext enable_windowscodecsext
 wine_fn_config_makefile dlls/windowscodecsext/tests enable_tests
+wine_fn_config_makefile dlls/windows.gaming.input enable_windows_gaming_input
 wine_fn_config_makefile dlls/winealsa.drv enable_winealsa_drv
 wine_fn_config_makefile dlls/wineandroid.drv enable_wineandroid_drv
 wine_fn_config_makefile dlls/winebus.sys enable_winebus_sys

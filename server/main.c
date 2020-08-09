@@ -37,11 +37,12 @@
 #include "thread.h"
 #include "request.h"
 #include "esync.h"
+#include "fsync.h"
 
 /* command-line options */
 int debug_level = 0;
 int foreground = 0;
-timeout_t master_socket_timeout = 3 * -TICKS_PER_SEC;  /* master socket timeout, default is 3 seconds */
+timeout_t master_socket_timeout = 0; /* master socket timeout, default is 3 seconds */
 const char *server_argv0;
 
 /* parse-line args */
@@ -140,6 +141,9 @@ int main( int argc, char *argv[] )
 
     sock_init();
     open_master_socket();
+
+    if (do_fsync())
+        fsync_init();
 
     if (do_esync())
         esync_init();
