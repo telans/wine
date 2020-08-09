@@ -54,7 +54,6 @@
 #include "winnls.h"
 #include "winerror.h"
 #include "wincon.h"
-#include "wine/condrv.h"
 #include "wine/server.h"
 #include "wine/exception.h"
 #include "wine/unicode.h"
@@ -249,10 +248,16 @@ HANDLE WINAPI OpenConsoleW(LPCWSTR name, DWORD access, BOOL inherit, DWORD creat
  */
 BOOL WINAPI VerifyConsoleIoHandle(HANDLE handle)
 {
-    IO_STATUS_BLOCK io;
-    DWORD mode;
-    return !NtDeviceIoControlFile( handle, NULL, NULL, NULL, &io, IOCTL_CONDRV_GET_MODE,
-                                   NULL, 0, &mode, sizeof(mode) );
+    BOOL ret;
+
+    if (!is_console_handle(handle)) return FALSE;
+    SERVER_START_REQ(get_console_mode)
+    {
+	req->handle = console_handle_unmap(handle);
+	ret = !wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return ret;
 }
 
 /******************************************************************
@@ -404,8 +409,6 @@ static enum read_console_input_return read_console_input(HANDLE handle, PINPUT_R
 {
     int fd;
     enum read_console_input_return      ret;
-    int blocking = timeout != 0;
-    DWORD read_bytes;
 
     if ((fd = get_console_bare_fd(handle)) != -1)
     {
@@ -418,10 +421,25 @@ static enum read_console_input_return read_console_input(HANDLE handle, PINPUT_R
         close(fd);
         if (ret != rci_gotone) return ret;
     }
+    else
+    {
+        if (!VerifyConsoleIoHandle(handle)) return rci_error;
 
-    if (!DeviceIoControl( handle, IOCTL_CONDRV_READ_INPUT, &blocking, sizeof(blocking), ir, sizeof(*ir), &read_bytes, NULL ))
-        return rci_error;
-    return read_bytes ? rci_gotone : rci_timeout;
+        if (WaitForSingleObject(handle, timeout) != WAIT_OBJECT_0)
+            return rci_timeout;
+    }
+
+    SERVER_START_REQ( read_console_input )
+    {
+        req->handle = console_handle_unmap(handle);
+        req->flush = TRUE;
+        wine_server_set_reply( req, ir, sizeof(INPUT_RECORD) );
+        if (wine_server_call_err( req ) || !reply->read) ret = rci_error;
+        else ret = rci_gotone;
+    }
+    SERVER_END_REQ;
+
+    return ret;
 }
 
 
@@ -689,24 +707,25 @@ LONG CALLBACK CONSOLE_HandleCtrlC( EXCEPTION_POINTERS *eptr )
  * WriteConsoleOutput helper: hides server call semantics
  * writes a string at a given pos with standard attribute
  */
-static int CONSOLE_WriteChars(HANDLE handle, const WCHAR *str, size_t length, COORD *coord)
+static int CONSOLE_WriteChars(HANDLE hCon, LPCWSTR lpBuffer, int nc, COORD* pos)
 {
-    struct condrv_output_params *params;
-    DWORD written = 0, size;
+    int written = -1;
 
-    if (!length) return 0;
+    if (!nc) return 0;
 
-    size = sizeof(*params) + length * sizeof(WCHAR);
-    if (!(params = HeapAlloc( GetProcessHeap(), 0, size ))) return FALSE;
-    params->mode   = CHAR_INFO_MODE_TEXTSTDATTR;
-    params->x      = coord->X;
-    params->y      = coord->Y;
-    params->width  = 0;
-    memcpy( params + 1, str, length * sizeof(*str) );
-    if (DeviceIoControl( handle, IOCTL_CONDRV_WRITE_OUTPUT, params, size,
-                         &written, sizeof(written), NULL, NULL ))
-        coord->X += written;
-    HeapFree( GetProcessHeap(), 0, params );
+    SERVER_START_REQ( write_console_output )
+    {
+        req->handle = console_handle_unmap(hCon);
+        req->x      = pos->X;
+        req->y      = pos->Y;
+        req->mode   = CHAR_INFO_MODE_TEXTSTDATTR;
+        req->wrap   = FALSE;
+        wine_server_add_data( req, lpBuffer, nc * sizeof(WCHAR) );
+        if (!wine_server_call_err( req )) written = reply->written;
+    }
+    SERVER_END_REQ;
+
+    if (written > 0) pos->X += written;
     return written;
 }
 
@@ -946,16 +965,19 @@ BOOL WINAPI WriteConsoleW(HANDLE hConsoleOutput, LPCVOID lpBuffer, DWORD nNumber
  */
 void CONSOLE_FillLineUniform(HANDLE hConsoleOutput, int i, int j, int len, LPCHAR_INFO lpFill)
 {
-    struct condrv_fill_output_params params;
-
-    params.mode  = CHAR_INFO_MODE_TEXTATTR;
-    params.x     = i;
-    params.y     = j;
-    params.count = len;
-    params.wrap  = FALSE;
-    params.ch    = lpFill->Char.UnicodeChar;
-    params.attr  = lpFill->Attributes;
-    DeviceIoControl( hConsoleOutput, IOCTL_CONDRV_FILL_OUTPUT, &params, sizeof(params), NULL, 0, NULL, NULL );
+    SERVER_START_REQ( fill_console_output )
+    {
+        req->handle    = console_handle_unmap(hConsoleOutput);
+        req->mode      = CHAR_INFO_MODE_TEXTATTR;
+        req->x         = i;
+        req->y         = j;
+        req->count     = len;
+        req->wrap      = FALSE;
+        req->data.ch   = lpFill->Char.UnicodeChar;
+        req->data.attr = lpFill->Attributes;
+        wine_server_call_err( req );
+    }
+    SERVER_END_REQ;
 }
 
 /******************************************************************
@@ -1067,9 +1089,15 @@ unsigned CONSOLE_GetNumHistoryEntries(void)
  */
 BOOL CONSOLE_GetEditionMode(HANDLE hConIn, int* mode)
 {
-    struct condrv_input_info info;
-    return DeviceIoControl( hConIn, IOCTL_CONDRV_GET_INPUT_INFO, NULL, 0, &info, sizeof(info), NULL, NULL )
-        ? info.edition_mode : 0;
+    unsigned ret = 0;
+    SERVER_START_REQ(get_console_input_info)
+    {
+        req->handle = console_handle_unmap(hConIn);
+        if ((ret = !wine_server_call_err( req )))
+            *mode = reply->edition_mode;
+    }
+    SERVER_END_REQ;
+    return ret;
 }
 
 /******************************************************************
@@ -1171,7 +1199,7 @@ BOOL CONSOLE_Init(RTL_USER_PROCESS_PARAMETERS *params)
      */
     if (!params->hStdInput || params->hStdInput == INVALID_HANDLE_VALUE)
         params->hStdInput = 0;
-    else if (VerifyConsoleIoHandle(params->hStdInput))
+    else if (VerifyConsoleIoHandle(console_handle_map(params->hStdInput)))
     {
         params->hStdInput = console_handle_map(params->hStdInput);
         save_console_mode(params->hStdInput);
@@ -1179,12 +1207,12 @@ BOOL CONSOLE_Init(RTL_USER_PROCESS_PARAMETERS *params)
 
     if (!params->hStdOutput || params->hStdOutput == INVALID_HANDLE_VALUE)
         params->hStdOutput = 0;
-    else if (VerifyConsoleIoHandle(params->hStdOutput))
+    else if (VerifyConsoleIoHandle(console_handle_map(params->hStdOutput)))
         params->hStdOutput = console_handle_map(params->hStdOutput);
 
     if (!params->hStdError || params->hStdError == INVALID_HANDLE_VALUE)
         params->hStdError = 0;
-    else if (VerifyConsoleIoHandle(params->hStdError))
+    else if (VerifyConsoleIoHandle(console_handle_map(params->hStdError)))
         params->hStdError = console_handle_map(params->hStdError);
 
     return TRUE;
@@ -1316,11 +1344,11 @@ BOOL WINAPI SetConsoleKeyShortcuts(BOOL set, BYTE keys, VOID *a, DWORD b)
 
 BOOL WINAPI GetCurrentConsoleFontEx(HANDLE hConsole, BOOL maxwindow, CONSOLE_FONT_INFOEX *fontinfo)
 {
-    DWORD size;
+    BOOL ret;
     struct
     {
-        struct condrv_output_info info;
-        WCHAR face_name[LF_FACESIZE - 1];
+        unsigned int color_map[16];
+        WCHAR face_name[LF_FACESIZE];
     } data;
 
     if (fontinfo->cbSize != sizeof(CONSOLE_FONT_INFOEX))
@@ -1329,30 +1357,37 @@ BOOL WINAPI GetCurrentConsoleFontEx(HANDLE hConsole, BOOL maxwindow, CONSOLE_FON
         return FALSE;
     }
 
-    if (!DeviceIoControl( hConsole, IOCTL_CONDRV_GET_OUTPUT_INFO, NULL, 0,
-                          &data, sizeof(data), &size, NULL ))
+    SERVER_START_REQ(get_console_output_info)
     {
-        SetLastError( ERROR_INVALID_HANDLE );
-        return FALSE;
+        req->handle = console_handle_unmap(hConsole);
+        wine_server_set_reply( req, &data, sizeof(data) - sizeof(WCHAR) );
+        if ((ret = !wine_server_call_err(req)))
+        {
+            fontinfo->nFont = 0;
+            if (maxwindow)
+            {
+                fontinfo->dwFontSize.X = min(reply->width, reply->max_width);
+                fontinfo->dwFontSize.Y = min(reply->height, reply->max_height);
+            }
+            else
+            {
+                fontinfo->dwFontSize.X = reply->win_right - reply->win_left + 1;
+                fontinfo->dwFontSize.Y = reply->win_bottom - reply->win_top + 1;
+            }
+            if (wine_server_reply_size( reply ) > sizeof(data.color_map))
+            {
+                data_size_t len = wine_server_reply_size( reply ) - sizeof(data.color_map);
+                memcpy( fontinfo->FaceName, data.face_name, len );
+                fontinfo->FaceName[len / sizeof(WCHAR)] = 0;
+            }
+            else
+                fontinfo->FaceName[0] = 0;
+            fontinfo->FontFamily = reply->font_pitch_family;
+            fontinfo->FontWeight = reply->font_weight;
+        }
     }
-
-    fontinfo->nFont = 0;
-    if (maxwindow)
-    {
-        fontinfo->dwFontSize.X = min( data.info.width, data.info.max_width );
-        fontinfo->dwFontSize.Y = min( data.info.height, data.info.max_height );
-    }
-    else
-    {
-        fontinfo->dwFontSize.X = data.info.win_right - data.info.win_left + 1;
-        fontinfo->dwFontSize.Y = data.info.win_bottom - data.info.win_top + 1;
-    }
-    size -= sizeof(data.info);
-    if (size) memcpy( fontinfo->FaceName, data.face_name, size );
-    fontinfo->FaceName[size / sizeof(WCHAR)] = 0;
-    fontinfo->FontFamily = data.info.font_pitch_family;
-    fontinfo->FontWeight = data.info.font_weight;
-    return TRUE;
+    SERVER_END_REQ;
+    return ret;
 }
 
 BOOL WINAPI GetCurrentConsoleFont(HANDLE hConsole, BOOL maxwindow, CONSOLE_FONT_INFO *fontinfo)
@@ -1374,7 +1409,6 @@ BOOL WINAPI GetCurrentConsoleFont(HANDLE hConsole, BOOL maxwindow, CONSOLE_FONT_
 
 static COORD get_console_font_size(HANDLE hConsole, DWORD index)
 {
-    struct condrv_output_info info;
     COORD c = {0,0};
 
     if (index >= GetNumberOfConsoleFonts())
@@ -1383,12 +1417,16 @@ static COORD get_console_font_size(HANDLE hConsole, DWORD index)
         return c;
     }
 
-    if (DeviceIoControl( hConsole, IOCTL_CONDRV_GET_OUTPUT_INFO, NULL, 0, &info, sizeof(info), NULL, NULL ))
+    SERVER_START_REQ(get_console_output_info)
     {
-        c.X = info.font_width;
-        c.Y = info.font_height;
+        req->handle = console_handle_unmap(hConsole);
+        if (!wine_server_call_err(req))
+        {
+            c.X = reply->font_width;
+            c.Y = reply->font_height;
+        }
     }
-    else SetLastError( ERROR_INVALID_HANDLE );
+    SERVER_END_REQ;
     return c;
 }
 

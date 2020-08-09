@@ -823,7 +823,7 @@ static void testScreenBuffer(HANDLE hConOut)
     ret = WriteConsoleA(hFileOutWT, test_str1, lstrlenA(test_str1), &len, NULL);
     error = GetLastError();
     ok(!ret, "Shouldn't succeed\n");
-    ok(error == ERROR_INVALID_HANDLE || error == ERROR_INVALID_FUNCTION,
+    todo_wine ok(error == ERROR_INVALID_HANDLE || error == ERROR_INVALID_FUNCTION,
        "GetLastError: got %u\n", error);
 
     CloseHandle(hFileOutRW);
@@ -3614,12 +3614,6 @@ static void test_FreeConsole(void)
        (GetLastError() == ERROR_INVALID_HANDLE || broken(GetLastError() == ERROR_FILE_NOT_FOUND /* winxp */)),
        "CreateFileA failed: %u\n", GetLastError());
 
-    handle = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
-                                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                                       CONSOLE_TEXTMODE_BUFFER, NULL);
-    ok(handle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_HANDLE,
-       "CreateConsoleScreenBuffer returned: %p (%u)\n", handle, GetLastError());
-
     if (!skip_nt)
     {
         SetStdHandle( STD_INPUT_HANDLE, (HANDLE)0xdeadbeef );
@@ -3770,105 +3764,6 @@ static void test_AttachConsole(HANDLE console)
     ok(!memcmp(buf, "Child", 5), "Unexpected console output\n");
 }
 
-static void test_AllocConsole_child(void)
-{
-    HANDLE unbound_output;
-    HANDLE prev_output, prev_error;
-    STARTUPINFOW si;
-    DWORD mode;
-    BOOL res;
-
-    GetStartupInfoW(&si);
-
-    prev_output = GetStdHandle(STD_OUTPUT_HANDLE);
-    res = DuplicateHandle(GetCurrentProcess(), prev_output, GetCurrentProcess(), &unbound_output,
-                          0, FALSE, DUPLICATE_SAME_ACCESS);
-    ok(res, "DuplicateHandle failed: %u\n", GetLastError());
-
-    res = GetConsoleMode(unbound_output, &mode);
-    ok(res, "GetConsoleMode failed: %u\n", GetLastError());
-
-    prev_error = GetStdHandle(STD_ERROR_HANDLE);
-    if (si.dwFlags & STARTF_USESTDHANDLES)
-    {
-        res = GetConsoleMode(prev_error, &mode);
-        ok(!res && GetLastError() == ERROR_INVALID_HANDLE, "GetConsoleMode failed: %u\n", GetLastError());
-    }
-
-    FreeConsole();
-
-    ok(GetStdHandle(STD_OUTPUT_HANDLE) == prev_output, "GetStdHandle(STD_OUTPUT_HANDLE) = %p\n", GetStdHandle(STD_OUTPUT_HANDLE));
-    ok(GetStdHandle(STD_ERROR_HANDLE) == prev_error, "GetStdHandle(STD_ERROR_HANDLE) = %p\n", GetStdHandle(STD_ERROR_HANDLE));
-    res = GetConsoleMode(unbound_output, &mode);
-    todo_wine
-    ok(!res && GetLastError() == ERROR_INVALID_HANDLE, "GetConsoleMode failed: %u\n", GetLastError());
-
-    res = AllocConsole();
-    ok(res, "AllocConsole failed: %u\n", GetLastError());
-
-    if (si.dwFlags & STARTF_USESTDHANDLES)
-    {
-        ok(GetStdHandle(STD_OUTPUT_HANDLE) == prev_output, "GetStdHandle(STD_OUTPUT_HANDLE) = %p\n", GetStdHandle(STD_OUTPUT_HANDLE));
-        ok(GetStdHandle(STD_ERROR_HANDLE) == prev_error, "GetStdHandle(STD_ERROR_HANDLE) = %p\n", GetStdHandle(STD_ERROR_HANDLE));
-    }
-
-    res = GetConsoleMode(unbound_output, &mode);
-    ok(res, "GetConsoleMode failed: %u\n", GetLastError());
-
-    FreeConsole();
-    SetStdHandle(STD_OUTPUT_HANDLE, NULL);
-    SetStdHandle(STD_ERROR_HANDLE, NULL);
-    res = AllocConsole();
-    ok(res, "AllocConsole failed: %u\n", GetLastError());
-
-    ok(GetStdHandle(STD_OUTPUT_HANDLE) != NULL, "GetStdHandle(STD_OUTPUT_HANDLE) = %p\n", GetStdHandle(STD_OUTPUT_HANDLE));
-    ok(GetStdHandle(STD_ERROR_HANDLE) != NULL, "GetStdHandle(STD_ERROR_HANDLE) = %p\n", GetStdHandle(STD_ERROR_HANDLE));
-
-    res = GetConsoleMode(unbound_output, &mode);
-    ok(res, "GetConsoleMode failed: %u\n", GetLastError());
-    res = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
-    ok(res, "GetConsoleMode failed: %u\n", GetLastError());
-    res = GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode);
-    ok(res, "GetConsoleMode failed: %u\n", GetLastError());
-
-    res = CloseHandle(unbound_output);
-    ok(res, "CloseHandle failed: %u\n", GetLastError());
-}
-
-static void test_AllocConsole(void)
-{
-    SECURITY_ATTRIBUTES inheritable_attr = { sizeof(inheritable_attr), NULL, TRUE };
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION info;
-    char **argv, buf[MAX_PATH];
-    HANDLE pipe_read, pipe_write;
-    BOOL res;
-
-    if (skip_nt) return;
-
-    winetest_get_mainargs(&argv);
-    sprintf(buf, "\"%s\" console alloc_console", argv[0], GetCurrentProcessId());
-    res = CreateProcessA(NULL, buf, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &info);
-    ok(res, "CreateProcess failed: %u\n", GetLastError());
-    CloseHandle(info.hThread);
-    wait_child_process(info.hProcess);
-    CloseHandle(info.hProcess);
-
-    res = CreatePipe(&pipe_read, &pipe_write, &inheritable_attr, 0);
-    ok(res, "CreatePipe failed: %u\n", GetLastError());
-
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdError = pipe_write;
-    res = CreateProcessA(NULL, buf, NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &info);
-    ok(res, "CreateProcess failed: %u\n", GetLastError());
-    CloseHandle(info.hThread);
-    wait_child_process(info.hProcess);
-    CloseHandle(info.hProcess);
-
-    CloseHandle(pipe_read);
-    CloseHandle(pipe_write);
-}
-
 START_TEST(console)
 {
     static const char font_name[] = "Lucida Console";
@@ -3892,12 +3787,6 @@ START_TEST(console)
         DWORD parent_pid;
         sscanf(argv[3], "%x", &parent_pid);
         test_AttachConsole_child(parent_pid);
-        return;
-    }
-
-    if (argc == 3 && !strcmp(argv[2], "alloc_console"))
-    {
-        test_AllocConsole_child();
         return;
     }
 
@@ -4043,6 +3932,5 @@ START_TEST(console)
     test_GetConsoleScreenBufferInfoEx(hConOut);
     test_SetConsoleScreenBufferInfoEx(hConOut);
     test_AttachConsole(hConOut);
-    test_AllocConsole();
     test_FreeConsole();
 }
