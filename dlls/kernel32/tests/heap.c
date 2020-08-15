@@ -334,6 +334,16 @@ static void test_heap(void)
     ok( size == 1, "wrong size %lu\n", size );
     GlobalFree( gbl );
 
+    /* HeapSize on memory from a global pointer */
+    gbl = GlobalAlloc(GMEM_MOVEABLE, 100);
+    ok(gbl != NULL, "returned error %d\n", GetLastError());
+    mem = GlobalLock(gbl);
+    ok(mem != NULL, "returned error %d\n", GetLastError());
+    size = HeapSize(GetProcessHeap(), 0, mem);
+    ok(size != (SIZE_T)-1 && size >= 100, "HeapSize returned %lu\n", size);
+    GlobalFree(gbl);
+
+
     /* ####################################### */
     /* Local*() functions */
     gbl = LocalAlloc(LMEM_MOVEABLE, 0);
