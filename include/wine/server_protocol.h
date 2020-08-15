@@ -308,6 +308,13 @@ struct hardware_msg_data
             int            y;
             unsigned int   data;
         } mouse;
+        struct
+        {
+            int            type;
+            obj_handle_t   device;
+            unsigned int   length;
+
+        } hid;
     } rawinput;
 };
 
@@ -354,7 +361,19 @@ typedef union
         unsigned int   msg;
         lparam_t       lparam;
     } hw;
+    struct
+    {
+        int            type;
+        obj_handle_t   device;
+        unsigned char  usage_page;
+        unsigned char  usage;
+        unsigned int   length;
+    } hid;
 } hw_input_t;
+#define HW_INPUT_MOUSE    0
+#define HW_INPUT_KEYBOARD 1
+#define HW_INPUT_HARDWARE 2
+#define HW_INPUT_HID      3
 
 typedef union
 {
@@ -3241,6 +3260,7 @@ struct send_hardware_message_request
     user_handle_t   win;
     hw_input_t      input;
     unsigned int    flags;
+    /* VARARG(data,bytes); */
     char __pad_52[4];
 };
 struct send_hardware_message_reply
@@ -3255,6 +3275,8 @@ struct send_hardware_message_reply
     char __pad_28[4];
 };
 #define SEND_HWMSG_INJECTED    0x01
+#define SEND_HWMSG_RAWINPUT    0x02
+#define SEND_HWMSG_WINDOW      0x04
 
 
 
@@ -5833,6 +5855,19 @@ struct update_rawinput_devices_reply
 };
 
 
+struct get_rawinput_devices_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_rawinput_devices_reply
+{
+    struct reply_header __header;
+    unsigned int device_count;
+    /* VARARG(devices,rawinput_devices); */
+    char __pad_12[4];
+};
+
 
 struct create_job_request
 {
@@ -6058,6 +6093,92 @@ enum esync_type
     ESYNC_AUTO_SERVER,
     ESYNC_MANUAL_SERVER,
     ESYNC_QUEUE,
+};
+
+enum fsync_type
+{
+    FSYNC_SEMAPHORE = 1,
+    FSYNC_AUTO_EVENT,
+    FSYNC_MANUAL_EVENT,
+    FSYNC_MUTEX,
+    FSYNC_AUTO_SERVER,
+    FSYNC_MANUAL_SERVER,
+    FSYNC_QUEUE,
+};
+
+
+struct create_fsync_request
+{
+    struct request_header __header;
+    unsigned int access;
+    int low;
+    int high;
+    int type;
+    /* VARARG(objattr,object_attributes); */
+    char __pad_28[4];
+};
+struct create_fsync_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    int type;
+    unsigned int shm_idx;
+    char __pad_20[4];
+};
+
+
+struct open_fsync_request
+{
+    struct request_header __header;
+    unsigned int access;
+    unsigned int attributes;
+    obj_handle_t rootdir;
+    int          type;
+    /* VARARG(name,unicode_str); */
+    char __pad_28[4];
+};
+struct open_fsync_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    int          type;
+    unsigned int shm_idx;
+    char __pad_20[4];
+};
+
+
+struct get_fsync_idx_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_fsync_idx_reply
+{
+    struct reply_header __header;
+    int          type;
+    unsigned int shm_idx;
+};
+
+struct fsync_msgwait_request
+{
+    struct request_header __header;
+    int          in_msgwait;
+};
+struct fsync_msgwait_reply
+{
+    struct reply_header __header;
+};
+
+struct get_fsync_apc_idx_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_fsync_apc_idx_reply
+{
+    struct reply_header __header;
+    unsigned int shm_idx;
+    char __pad_12[4];
 };
 
 
@@ -6361,6 +6482,7 @@ enum request
     REQ_free_user_handle,
     REQ_set_cursor,
     REQ_update_rawinput_devices,
+    REQ_get_rawinput_devices,
     REQ_create_job,
     REQ_open_job,
     REQ_assign_job,
@@ -6376,6 +6498,11 @@ enum request
     REQ_get_esync_fd,
     REQ_get_esync_apc_fd,
     REQ_esync_msgwait,
+    REQ_create_fsync,
+    REQ_open_fsync,
+    REQ_get_fsync_idx,
+    REQ_fsync_msgwait,
+    REQ_get_fsync_apc_idx,
     REQ_NB_REQUESTS
 };
 
@@ -6681,6 +6808,7 @@ union generic_request
     struct free_user_handle_request free_user_handle_request;
     struct set_cursor_request set_cursor_request;
     struct update_rawinput_devices_request update_rawinput_devices_request;
+    struct get_rawinput_devices_request get_rawinput_devices_request;
     struct create_job_request create_job_request;
     struct open_job_request open_job_request;
     struct assign_job_request assign_job_request;
@@ -6696,6 +6824,11 @@ union generic_request
     struct get_esync_fd_request get_esync_fd_request;
     struct get_esync_apc_fd_request get_esync_apc_fd_request;
     struct esync_msgwait_request esync_msgwait_request;
+    struct create_fsync_request create_fsync_request;
+    struct open_fsync_request open_fsync_request;
+    struct get_fsync_idx_request get_fsync_idx_request;
+    struct fsync_msgwait_request fsync_msgwait_request;
+    struct get_fsync_apc_idx_request get_fsync_apc_idx_request;
 };
 union generic_reply
 {
@@ -6999,6 +7132,7 @@ union generic_reply
     struct free_user_handle_reply free_user_handle_reply;
     struct set_cursor_reply set_cursor_reply;
     struct update_rawinput_devices_reply update_rawinput_devices_reply;
+    struct get_rawinput_devices_reply get_rawinput_devices_reply;
     struct create_job_reply create_job_reply;
     struct open_job_reply open_job_reply;
     struct assign_job_reply assign_job_reply;
@@ -7014,6 +7148,11 @@ union generic_reply
     struct get_esync_fd_reply get_esync_fd_reply;
     struct get_esync_apc_fd_reply get_esync_apc_fd_reply;
     struct esync_msgwait_reply esync_msgwait_reply;
+    struct create_fsync_reply create_fsync_reply;
+    struct open_fsync_reply open_fsync_reply;
+    struct get_fsync_idx_reply get_fsync_idx_reply;
+    struct fsync_msgwait_reply fsync_msgwait_reply;
+    struct get_fsync_apc_idx_reply get_fsync_apc_idx_reply;
 };
 
 /* ### protocol_version begin ### */

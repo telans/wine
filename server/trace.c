@@ -387,23 +387,27 @@ static void dump_hw_input( const char *prefix, const hw_input_t *input )
 {
     switch (input->type)
     {
-    case INPUT_MOUSE:
+    case HW_INPUT_MOUSE:
         fprintf( stderr, "%s{type=MOUSE,x=%d,y=%d,data=%08x,flags=%08x,time=%u",
                  prefix, input->mouse.x, input->mouse.y, input->mouse.data, input->mouse.flags,
                  input->mouse.time );
         dump_uint64( ",info=", &input->mouse.info );
         fputc( '}', stderr );
         break;
-    case INPUT_KEYBOARD:
+    case HW_INPUT_KEYBOARD:
         fprintf( stderr, "%s{type=KEYBOARD,vkey=%04hx,scan=%04hx,flags=%08x,time=%u",
                  prefix, input->kbd.vkey, input->kbd.scan, input->kbd.flags, input->kbd.time );
         dump_uint64( ",info=", &input->kbd.info );
         fputc( '}', stderr );
         break;
-    case INPUT_HARDWARE:
+    case HW_INPUT_HARDWARE:
         fprintf( stderr, "%s{type=HARDWARE,msg=%04x", prefix, input->hw.msg );
         dump_uint64( ",lparam=", &input->hw.lparam );
         fputc( '}', stderr );
+        break;
+    case HW_INPUT_HID:
+        fprintf( stderr, "%s{type=HID,device=%04x,usage_page=%02x,usage=%02x,length=%04x}",
+                 prefix, input->hid.device, input->hid.usage_page, input->hid.usage, input->hid.length );
         break;
     default:
         fprintf( stderr, "%s{type=%04x}", prefix, input->type );
@@ -2877,6 +2881,7 @@ static void dump_send_hardware_message_request( const struct send_hardware_messa
     fprintf( stderr, " win=%08x", req->win );
     dump_hw_input( ", input=", &req->input );
     fprintf( stderr, ", flags=%08x", req->flags );
+    dump_varargs_bytes( ", data=", cur_size );
 }
 
 static void dump_send_hardware_message_reply( const struct send_hardware_message_reply *req )
@@ -4637,6 +4642,16 @@ static void dump_update_rawinput_devices_request( const struct update_rawinput_d
     dump_varargs_rawinput_devices( " devices=", cur_size );
 }
 
+static void dump_get_rawinput_devices_request( const struct get_rawinput_devices_request *req )
+{
+}
+
+static void dump_get_rawinput_devices_reply( const struct get_rawinput_devices_reply *req )
+{
+    fprintf( stderr, " device_count=%08x", req->device_count );
+    dump_varargs_rawinput_devices( ", devices=", cur_size );
+}
+
 static void dump_create_job_request( const struct create_job_request *req )
 {
     fprintf( stderr, " access=%08x", req->access );
@@ -4763,6 +4778,63 @@ static void dump_get_esync_apc_fd_request( const struct get_esync_apc_fd_request
 static void dump_esync_msgwait_request( const struct esync_msgwait_request *req )
 {
     fprintf( stderr, " in_msgwait=%d", req->in_msgwait );
+}
+
+static void dump_create_fsync_request( const struct create_fsync_request *req )
+{
+    fprintf( stderr, " access=%08x", req->access );
+    fprintf( stderr, ", low=%d", req->low );
+    fprintf( stderr, ", high=%d", req->high );
+    fprintf( stderr, ", type=%d", req->type );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+
+static void dump_create_fsync_reply( const struct create_fsync_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", type=%d", req->type );
+    fprintf( stderr, ", shm_idx=%08x", req->shm_idx );
+}
+
+static void dump_open_fsync_request( const struct open_fsync_request *req )
+{
+    fprintf( stderr, " access=%08x", req->access );
+    fprintf( stderr, ", attributes=%08x", req->attributes );
+    fprintf( stderr, ", rootdir=%04x", req->rootdir );
+    fprintf( stderr, ", type=%d", req->type );
+    dump_varargs_unicode_str( ", name=", cur_size );
+}
+
+static void dump_open_fsync_reply( const struct open_fsync_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", type=%d", req->type );
+    fprintf( stderr, ", shm_idx=%08x", req->shm_idx );
+}
+
+static void dump_get_fsync_idx_request( const struct get_fsync_idx_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_fsync_idx_reply( const struct get_fsync_idx_reply *req )
+{
+    fprintf( stderr, " type=%d", req->type );
+    fprintf( stderr, ", shm_idx=%08x", req->shm_idx );
+}
+
+static void dump_fsync_msgwait_request( const struct fsync_msgwait_request *req )
+{
+    fprintf( stderr, " in_msgwait=%d", req->in_msgwait );
+}
+
+static void dump_get_fsync_apc_idx_request( const struct get_fsync_apc_idx_request *req )
+{
+}
+
+static void dump_get_fsync_apc_idx_reply( const struct get_fsync_apc_idx_reply *req )
+{
+    fprintf( stderr, " shm_idx=%08x", req->shm_idx );
 }
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] = {
@@ -5064,6 +5136,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] = {
     (dump_func)dump_free_user_handle_request,
     (dump_func)dump_set_cursor_request,
     (dump_func)dump_update_rawinput_devices_request,
+    (dump_func)dump_get_rawinput_devices_request,
     (dump_func)dump_create_job_request,
     (dump_func)dump_open_job_request,
     (dump_func)dump_assign_job_request,
@@ -5079,6 +5152,11 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] = {
     (dump_func)dump_get_esync_fd_request,
     (dump_func)dump_get_esync_apc_fd_request,
     (dump_func)dump_esync_msgwait_request,
+    (dump_func)dump_create_fsync_request,
+    (dump_func)dump_open_fsync_request,
+    (dump_func)dump_get_fsync_idx_request,
+    (dump_func)dump_fsync_msgwait_request,
+    (dump_func)dump_get_fsync_apc_idx_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] = {
@@ -5380,6 +5458,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] = {
     NULL,
     (dump_func)dump_set_cursor_reply,
     NULL,
+    (dump_func)dump_get_rawinput_devices_reply,
     (dump_func)dump_create_job_reply,
     (dump_func)dump_open_job_reply,
     NULL,
@@ -5395,6 +5474,11 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] = {
     (dump_func)dump_get_esync_fd_reply,
     NULL,
     NULL,
+    (dump_func)dump_create_fsync_reply,
+    (dump_func)dump_open_fsync_reply,
+    (dump_func)dump_get_fsync_idx_reply,
+    NULL,
+    (dump_func)dump_get_fsync_apc_idx_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] = {
@@ -5696,6 +5780,7 @@ static const char * const req_names[REQ_NB_REQUESTS] = {
     "free_user_handle",
     "set_cursor",
     "update_rawinput_devices",
+    "get_rawinput_devices",
     "create_job",
     "open_job",
     "assign_job",
@@ -5711,6 +5796,11 @@ static const char * const req_names[REQ_NB_REQUESTS] = {
     "get_esync_fd",
     "get_esync_apc_fd",
     "esync_msgwait",
+    "create_fsync",
+    "open_fsync",
+    "get_fsync_idx",
+    "fsync_msgwait",
+    "get_fsync_apc_idx",
 };
 
 static const struct

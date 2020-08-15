@@ -218,6 +218,7 @@
 #define IDC_ENABLE_EAX                  9003
 #define IDC_ENABLE_HIDEWINE             9004
 #define IDC_ENABLE_GTK3                 9005
+#define IDC_ENABLE_ARB                  9006
 
 /* About tab */
 #define IDC_ABT_OWNER                8432

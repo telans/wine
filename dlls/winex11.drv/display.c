@@ -30,6 +30,7 @@
 #include "initguid.h"
 #include "devguid.h"
 #include "devpkey.h"
+#include "ntddvdeo.h"
 #include "setupapi.h"
 #define WIN32_NO_STATUS
 #include "winternl.h"
@@ -40,8 +41,11 @@
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 
 DEFINE_DEVPROPKEY(DEVPROPKEY_GPU_LUID, 0x60b193cb, 0x5276, 0x4d0f, 0x96, 0xfc, 0xf1, 0x73, 0xab, 0xad, 0x3e, 0xc6, 2);
+DEFINE_DEVPROPKEY(DEVPROPKEY_MONITOR_GPU_LUID, 0xca085853, 0x16ce, 0x48aa, 0xb1, 0x14, 0xde, 0x9c, 0x72, 0x33, 0x42, 0x23, 1);
+DEFINE_DEVPROPKEY(DEVPROPKEY_MONITOR_OUTPUT_ID, 0xca085853, 0x16ce, 0x48aa, 0xb1, 0x14, 0xde, 0x9c, 0x72, 0x33, 0x42, 0x23, 2);
 
-/* Wine specific monitor properties */
+/* Wine specific properties */
+DEFINE_DEVPROPKEY(WINE_DEVPROPKEY_GPU_VULKAN_UUID, 0x233a9ef3, 0xafc4, 0x4abd, 0xb5, 0x64, 0xc3, 0x2f, 0x21, 0xf1, 0x53, 0x5c, 2);
 DEFINE_DEVPROPKEY(WINE_DEVPROPKEY_MONITOR_STATEFLAGS, 0x233a9ef3, 0xafc4, 0x4abd, 0xb5, 0x64, 0xc3, 0x2f, 0x21, 0xf1, 0x53, 0x5b, 2);
 DEFINE_DEVPROPKEY(WINE_DEVPROPKEY_MONITOR_RCMONITOR, 0x233a9ef3, 0xafc4, 0x4abd, 0xb5, 0x64, 0xc3, 0x2f, 0x21, 0xf1, 0x53, 0x5b, 3);
 DEFINE_DEVPROPKEY(WINE_DEVPROPKEY_MONITOR_RCWORK, 0x233a9ef3, 0xafc4, 0x4abd, 0xb5, 0x64, 0xc3, 0x2f, 0x21, 0xf1, 0x53, 0x5b, 4);
@@ -332,11 +336,72 @@ void X11DRV_DisplayDevices_RegisterEventHandlers(void)
         handler->register_event_handlers();
 }
 
-/* Initialize a GPU instance and return its GUID string in guid_string and driver value in driver parameter */
+/* This function sets device interface link state to enabled.
+ * The link state should be set via IoSetDeviceInterfaceState(),
+ * but IoSetDeviceInterfaceState() requires a PnP driver, which
+ * currently doesn't exist for display devices. */
+static BOOL link_device(const WCHAR *instance, const GUID *guid)
+{
+    static const WCHAR device_instanceW[] = {'D','e','v','i','c','e','I','n','s','t','a','n','c','e',0};
+    static const WCHAR hash_controlW[] = {'#','\\','C','o','n','t','r','o','l',0};
+    static const WCHAR linkedW[] = {'L','i','n','k','e','d',0};
+    static const DWORD enabled = 1;
+    WCHAR device_key_name[MAX_PATH], device_instance[MAX_PATH];
+    HKEY iface_key, device_key, control_key;
+    DWORD length, type, index = 0;
+    BOOL ret = FALSE;
+    LSTATUS lr;
+
+    iface_key = SetupDiOpenClassRegKeyExW(guid, KEY_ALL_ACCESS, DIOCR_INTERFACE, NULL, NULL);
+    while (1)
+    {
+        length = ARRAY_SIZE(device_key_name);
+        lr = RegEnumKeyExW(iface_key, index++, device_key_name, &length, NULL, NULL, NULL, NULL);
+        if (lr)
+            break;
+
+        lr = RegOpenKeyExW(iface_key, device_key_name, 0, KEY_ALL_ACCESS, &device_key);
+        if (lr)
+            continue;
+
+        length = ARRAY_SIZE(device_instance);
+        lr = RegQueryValueExW(device_key, device_instanceW, NULL, &type, (BYTE *)device_instance, &length);
+        if (lr || type != REG_SZ)
+        {
+            RegCloseKey(device_key);
+            continue;
+        }
+
+        if (lstrcmpiW(device_instance, instance))
+        {
+            RegCloseKey(device_key);
+            continue;
+        }
+
+        lr = RegCreateKeyExW(device_key, hash_controlW, 0, NULL, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, NULL, &control_key, NULL);
+        RegCloseKey(device_key);
+        if (lr)
+            continue;
+
+        lr = RegSetValueExW(control_key, linkedW, 0, REG_DWORD, (const BYTE *)&enabled, sizeof(enabled));
+        RegCloseKey(control_key);
+        if (!lr)
+        {
+            ret = TRUE;
+            break;
+        }
+    }
+    RegCloseKey(iface_key);
+    return ret;
+}
+
+/* Initialize a GPU instance.
+ * Return its GUID string in guid_string, driver value in driver parameter and LUID in gpu_luid */
 static BOOL X11DRV_InitGpu(HDEVINFO devinfo, const struct x11drv_gpu *gpu, INT gpu_index, WCHAR *guid_string,
-                           WCHAR *driver)
+                           WCHAR *driver, LUID *gpu_luid)
 {
     static const BOOL present = TRUE;
+    SP_DEVICE_INTERFACE_DATA iface_data = {sizeof(iface_data)};
     SP_DEVINFO_DATA device_data = {sizeof(device_data)};
     WCHAR instanceW[MAX_PATH];
     DEVPROPTYPE property_type;
@@ -349,6 +414,8 @@ static BOOL X11DRV_InitGpu(HDEVINFO devinfo, const struct x11drv_gpu *gpu, INT g
     BOOL ret = FALSE;
     FILETIME filetime;
 
+    TRACE("GPU id:0x%s name:%s.\n", wine_dbgstr_longlong(gpu->id), wine_dbgstr_w(gpu->name));
+
     sprintfW(instanceW, gpu_instance_fmtW, gpu->vendor_id, gpu->device_id, gpu->subsys_id, gpu->revision_id, gpu_index);
     if (!SetupDiOpenDeviceInfoW(devinfo, instanceW, NULL, 0, &device_data))
     {
@@ -356,6 +423,13 @@ static BOOL X11DRV_InitGpu(HDEVINFO devinfo, const struct x11drv_gpu *gpu, INT g
         if (!SetupDiRegisterDeviceInfo(devinfo, &device_data, 0, NULL, NULL, NULL))
             goto done;
     }
+
+    /* Register GUID_DEVINTERFACE_DISPLAY_ADAPTER */
+    if (!SetupDiCreateDeviceInterfaceW(devinfo, &device_data, &GUID_DEVINTERFACE_DISPLAY_ADAPTER, NULL, 0, &iface_data))
+        goto done;
+
+    if (!link_device(instanceW, &GUID_DEVINTERFACE_DISPLAY_ADAPTER))
+        goto done;
 
     /* Write HardwareID registry property, REG_MULTI_SZ */
     written = sprintfW(bufferW, gpu_hardware_id_fmtW, gpu->vendor_id, gpu->device_id);
@@ -380,8 +454,15 @@ static BOOL X11DRV_InitGpu(HDEVINFO devinfo, const struct x11drv_gpu *gpu, INT g
                                        DEVPROP_TYPE_UINT64, (const BYTE *)&luid, sizeof(luid), 0))
             goto done;
     }
-    TRACE("GPU id:0x%s name:%s LUID:%08x:%08x.\n", wine_dbgstr_longlong(gpu->id),
-          wine_dbgstr_w(gpu->name), luid.HighPart, luid.LowPart);
+    *gpu_luid = luid;
+    TRACE("LUID:%08x:%08x.\n", luid.HighPart, luid.LowPart);
+
+    /* Write WINE_DEVPROPKEY_GPU_VULKAN_UUID property */
+    if (!SetupDiSetDevicePropertyW(devinfo, &device_data, &WINE_DEVPROPKEY_GPU_VULKAN_UUID,
+                                   DEVPROP_TYPE_GUID, (const BYTE *)&gpu->vulkan_uuid,
+                                   sizeof(gpu->vulkan_uuid), 0))
+        goto done;
+    TRACE("Vulkan UUID:%s.\n", wine_dbgstr_guid(&gpu->vulkan_uuid));
 
     /* Open driver key.
      * This is where HKLM\System\CurrentControlSet\Control\Video\{GPU GUID}\{Adapter Index} links to */
@@ -495,8 +576,9 @@ done:
 }
 
 static BOOL X11DRV_InitMonitor(HDEVINFO devinfo, const struct x11drv_monitor *monitor, int monitor_index,
-                               int video_index)
+                               int video_index, const LUID *gpu_luid, UINT output_id)
 {
+    SP_DEVICE_INTERFACE_DATA iface_data = {sizeof(iface_data)};
     SP_DEVINFO_DATA device_data = {sizeof(SP_DEVINFO_DATA)};
     WCHAR bufferW[MAX_PATH];
     HKEY hkey;
@@ -508,9 +590,26 @@ static BOOL X11DRV_InitMonitor(HDEVINFO devinfo, const struct x11drv_monitor *mo
     if (!SetupDiRegisterDeviceInfo(devinfo, &device_data, 0, NULL, NULL, NULL))
         goto done;
 
+    /* Register GUID_DEVINTERFACE_MONITOR */
+    if (!SetupDiCreateDeviceInterfaceW(devinfo, &device_data, &GUID_DEVINTERFACE_MONITOR, NULL, 0, &iface_data))
+        goto done;
+
+    if (!link_device(bufferW, &GUID_DEVINTERFACE_MONITOR))
+        goto done;
+
     /* Write HardwareID registry property */
     if (!SetupDiSetDeviceRegistryPropertyW(devinfo, &device_data, SPDRP_HARDWAREID,
                                            (const BYTE *)monitor_hardware_idW, sizeof(monitor_hardware_idW)))
+        goto done;
+
+    /* Write DEVPROPKEY_MONITOR_GPU_LUID */
+    if (!SetupDiSetDevicePropertyW(devinfo, &device_data, &DEVPROPKEY_MONITOR_GPU_LUID,
+                                   DEVPROP_TYPE_INT64, (const BYTE *)gpu_luid, sizeof(*gpu_luid), 0))
+        goto done;
+
+    /* Write DEVPROPKEY_MONITOR_OUTPUT_ID */
+    if (!SetupDiSetDevicePropertyW(devinfo, &device_data, &DEVPROPKEY_MONITOR_OUTPUT_ID,
+                                   DEVPROP_TYPE_UINT32, (const BYTE *)&output_id, sizeof(output_id), 0))
         goto done;
 
     /* Create driver key */
@@ -614,6 +713,8 @@ void X11DRV_DisplayDevices_Init(BOOL force)
     DWORD disposition = 0;
     WCHAR guidW[40];
     WCHAR driverW[1024];
+    LUID gpu_luid;
+    UINT output_id = 0;
 
     mutex = get_display_device_init_mutex();
 
@@ -642,7 +743,7 @@ void X11DRV_DisplayDevices_Init(BOOL force)
 
     for (gpu = 0; gpu < gpu_count; gpu++)
     {
-        if (!X11DRV_InitGpu(gpu_devinfo, &gpus[gpu], gpu, guidW, driverW))
+        if (!X11DRV_InitGpu(gpu_devinfo, &gpus[gpu], gpu, guidW, driverW, &gpu_luid))
             goto done;
 
         /* Initialize adapters */
@@ -664,7 +765,7 @@ void X11DRV_DisplayDevices_Init(BOOL force)
             for (monitor = 0; monitor < monitor_count; monitor++)
             {
                 TRACE("monitor: %#x %s\n", monitor, wine_dbgstr_w(monitors[monitor].name));
-                if (!X11DRV_InitMonitor(monitor_devinfo, &monitors[monitor], monitor, video_index))
+                if (!X11DRV_InitMonitor(monitor_devinfo, &monitors[monitor], monitor, video_index, &gpu_luid, output_id++))
                     goto done;
             }
 

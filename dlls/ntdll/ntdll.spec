@@ -1596,6 +1596,7 @@
 
 # Virtual memory
 @ cdecl __wine_locked_recvmsg(long ptr long)
+@ cdecl __wine_needs_override_large_address_aware()
 
 # Token
 @ cdecl __wine_create_default_token(long)
@@ -1612,5 +1613,5 @@
 @ cdecl __wine_set_signal_handler(long ptr)
 
 # Filesystem
-@ cdecl wine_nt_to_unix_file_name(ptr ptr long long)
+@ cdecl wine_nt_to_unix_file_name(ptr ptr long)
 @ cdecl wine_unix_to_nt_file_name(ptr ptr)
