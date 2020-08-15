@@ -473,12 +473,12 @@ DWORD file_name_WtoA( LPCWSTR src, INT srclen, LPSTR dest, INT destlen )
  */
 static BOOL is_same_file( HANDLE h1, HANDLE h2 )
 {
-    FILE_OBJECTID_BUFFER id1, id2;
+    FILE_ID_INFORMATION id1, id2;
     IO_STATUS_BLOCK io;
 
-    return (!NtFsControlFile( h1, 0, NULL, NULL, &io, FSCTL_GET_OBJECT_ID, NULL, 0, &id1, sizeof(id1) ) &&
-            !NtFsControlFile( h2, 0, NULL, NULL, &io, FSCTL_GET_OBJECT_ID, NULL, 0, &id2, sizeof(id2) ) &&
-            !memcmp( &id1.ObjectId, &id2.ObjectId, sizeof(id1.ObjectId) ));
+    return !NtQueryInformationFile( h1, &io, &id1, sizeof(id1), FileIdInformation ) &&
+           !NtQueryInformationFile( h2, &io, &id2, sizeof(id2), FileIdInformation ) &&
+           !memcmp( &id1, &id2, sizeof(FILE_ID_INFORMATION) );
 }
 
 
@@ -3445,50 +3445,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH ReadFileScatter( HANDLE file, FILE_SEGMENT_ELEMENT
 
     return set_ntstatus( NtReadFileScatter( file, overlapped->hEvent, NULL, cvalue, io,
                                             segments, count, &offset, NULL ));
-}
-
-
-/***********************************************************************
- *	RemoveDirectoryA   (kernelbase.@)
- */
-BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryA( LPCSTR path )
-{
-    WCHAR *pathW;
-
-    if (!(pathW = file_name_AtoW( path, FALSE ))) return FALSE;
-    return RemoveDirectoryW( pathW );
-}
-
-
-/***********************************************************************
- *	RemoveDirectoryW   (kernelbase.@)
- */
-BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryW( LPCWSTR path )
-{
-    OBJECT_ATTRIBUTES attr;
-    UNICODE_STRING nt_name;
-    IO_STATUS_BLOCK io;
-    NTSTATUS status;
-    HANDLE handle;
-
-    TRACE( "%s\n", debugstr_w(path) );
-
-    status = RtlDosPathNameToNtPathName_U_WithStatus( path, &nt_name, NULL, NULL );
-    if (!set_ntstatus( status )) return FALSE;
-
-    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
-    status = NtOpenFile( &handle, DELETE | SYNCHRONIZE, &attr, &io,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
-    RtlFreeUnicodeString( &nt_name );
-
-    if (!status)
-    {
-        FILE_DISPOSITION_INFORMATION info = { TRUE };
-        status = NtSetInformationFile( handle, &io, &info, sizeof(info), FileDispositionInformation );
-        NtClose( handle );
-    }
-    return set_ntstatus( status );
 }
 
 

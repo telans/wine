@@ -23,6 +23,7 @@
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
+#define NONAMELESSUNION
 #include "windef.h"
 #include "winbase.h"
 #include "winnt.h"
@@ -42,7 +43,6 @@ static PVOID     (WINAPI *pRtlAddVectoredExceptionHandler)(ULONG first, PVECTORE
 static ULONG     (WINAPI *pRtlRemoveVectoredExceptionHandler)(PVOID handler);
 static PVOID     (WINAPI *pRtlAddVectoredContinueHandler)(ULONG first, PVECTORED_EXCEPTION_HANDLER func);
 static ULONG     (WINAPI *pRtlRemoveVectoredContinueHandler)(PVOID handler);
-static void      (WINAPI *pRtlSetUnhandledExceptionFilter)(PRTL_EXCEPTION_FILTER filter);
 static NTSTATUS  (WINAPI *pNtReadVirtualMemory)(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
 static NTSTATUS  (WINAPI *pNtTerminateProcess)(HANDLE handle, LONG exit_code);
 static NTSTATUS  (WINAPI *pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
@@ -67,10 +67,6 @@ typedef struct _RTL_UNLOAD_EVENT_TRACE
 
 static RTL_UNLOAD_EVENT_TRACE *(WINAPI *pRtlGetUnloadEventTrace)(void);
 static void (WINAPI *pRtlGetUnloadEventTraceEx)(ULONG **element_size, ULONG **element_count, void **event_trace);
-
-#ifndef EH_NESTED_CALL
-#define EH_NESTED_CALL 0x10
-#endif
 
 #if defined(__x86_64__)
 typedef struct
@@ -164,9 +160,6 @@ static int       (CDECL *p_setjmp)(_JUMP_BUFFER*);
 
 static int      my_argc;
 static char**   my_argv;
-static BOOL     is_wow64;
-static BOOL have_vectored_api;
-static int test_stage;
 
 #ifdef __i386__
 
@@ -177,6 +170,10 @@ static int test_stage;
 #define MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION 0x04
 #define MEM_EXECUTE_OPTION_PERMANENT 0x08
 #endif
+
+static int      test_stage;
+
+static BOOL is_wow64;
 
 /* Test various instruction combinations that cause a protection fault on the i386,
  * and check what the resulting exception looks like.
@@ -330,6 +327,7 @@ static const struct exception
 };
 
 static int got_exception;
+static BOOL have_vectored_api;
 
 static void run_exception_test(void *handler, const void* context,
                                const void *code, unsigned int code_size,
@@ -381,16 +379,14 @@ static LONG CALLBACK rtlraiseexception_vectored_handler(EXCEPTION_POINTERS *Exce
     if(rec->ExceptionCode == EXCEPTION_BREAKPOINT)
     {
         ok(context->Eip == (DWORD)code_mem + 0xa ||
-           broken(context->Eip == (DWORD)code_mem + 0xb) /* win2k3 */ ||
-           broken(context->Eip == (DWORD)code_mem + 0xd) /* w2008 */,
+           broken(context->Eip == (DWORD)code_mem + 0xb), /* win2k3 */
            "Eip at %x instead of %x or %x\n", context->Eip,
            (DWORD)code_mem + 0xa, (DWORD)code_mem + 0xb);
     }
     else
     {
-        ok(context->Eip == (DWORD)code_mem + 0xb ||
-           broken(context->Eip == (DWORD)code_mem + 0xd) /* w2008 */,
-           "Eip at %x instead of %x\n", context->Eip, (DWORD)code_mem + 0xb);
+        ok(context->Eip == (DWORD)code_mem + 0xb, "Eip at %x instead of %x\n",
+           context->Eip, (DWORD)code_mem + 0xb);
     }
 
     /* test if context change is preserved from vectored handler to stack handlers */
@@ -418,16 +414,14 @@ static DWORD rtlraiseexception_handler( EXCEPTION_RECORD *rec, EXCEPTION_REGISTR
     if(rec->ExceptionCode == EXCEPTION_BREAKPOINT)
     {
         ok(context->Eip == (DWORD)code_mem + 0xa ||
-           broken(context->Eip == (DWORD)code_mem + 0xb) /* win2k3 */ ||
-           broken(context->Eip == (DWORD)code_mem + 0xd) /* w2008 */,
+           broken(context->Eip == (DWORD)code_mem + 0xb), /* win2k3 */
            "Eip at %x instead of %x or %x\n", context->Eip,
            (DWORD)code_mem + 0xa, (DWORD)code_mem + 0xb);
     }
     else
     {
-        ok(context->Eip == (DWORD)code_mem + 0xb ||
-           broken(context->Eip == (DWORD)code_mem + 0xd) /* w2008 */,
-           "Eip at %x instead of %x\n", context->Eip, (DWORD)code_mem + 0xb);
+        ok(context->Eip == (DWORD)code_mem + 0xb, "Eip at %x instead of %x\n",
+           context->Eip, (DWORD)code_mem + 0xb);
     }
 
     if(have_vectored_api)
@@ -1053,10 +1047,11 @@ static void test_debugger(void)
                 {
                     ok((char *)ctx.Eip == (char *)code_mem_address + 0xb, "Eip at %x instead of %p\n",
                        ctx.Eip, (char *)code_mem_address + 0xb);
-                    /* setting the context from debugger does not affect the context that the
-                     * exception handler gets, except on w2008 */
-                    ctx.Eip = (UINT_PTR)code_mem_address + 0xd;
+                    /* setting the context from debugger does not affect the context, the exception handlers gets */
+                    /* uncomment once wine is fixed */
+                    /* ctx.Eip = 0x12345; */
                     ctx.Eax = 0xf00f00f1;
+
                     /* let the debuggee handle the exception */
                     continuestatus = DBG_EXCEPTION_NOT_HANDLED;
                 }
@@ -1066,11 +1061,16 @@ static void test_debugger(void)
                     {
                         /* debugger gets first chance exception with unmodified ctx.Eip */
                         ok((char *)ctx.Eip == (char *)code_mem_address + 0xb, "Eip at 0x%x instead of %p\n",
-                           ctx.Eip, (char *)code_mem_address + 0xb);
-                        ctx.Eip = (UINT_PTR)code_mem_address + 0xd;
+                            ctx.Eip, (char *)code_mem_address + 0xb);
+
+                        /* setting the context from debugger does not affect the context, the exception handlers gets */
+                        /* uncomment once wine is fixed */
+                        /* ctx.Eip = 0x12345; */
                         ctx.Eax = 0xf00f00f1;
+
                         /* pass exception to debuggee
-                         * exception will not be handled and a second chance exception will be raised */
+                         * exception will not be handled and
+                         * a second chance exception will be raised */
                         continuestatus = DBG_EXCEPTION_NOT_HANDLED;
                     }
                     else
@@ -1080,8 +1080,7 @@ static void test_debugger(void)
                         if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
                         {
                             ok((char *)ctx.Eip == (char *)code_mem_address + 0xa ||
-                               broken(is_wow64 && (char *)ctx.Eip == (char *)code_mem_address + 0xb) ||
-                               broken((char *)ctx.Eip == (char *)code_mem_address + 0xd) /* w2008 */,
+                               broken(is_wow64 && (char *)ctx.Eip == (char *)code_mem_address + 0xb),
                                "Eip at 0x%x instead of %p\n",
                                 ctx.Eip, (char *)code_mem_address + 0xa);
                             /* need to fixup Eip for debuggee */
@@ -1089,10 +1088,8 @@ static void test_debugger(void)
                                 ctx.Eip += 1;
                         }
                         else
-                            ok((char *)ctx.Eip == (char *)code_mem_address + 0xb ||
-                               broken((char *)ctx.Eip == (char *)code_mem_address + 0xd) /* w2008 */,
-                               "Eip at 0x%x instead of %p\n",
-                               ctx.Eip, (char *)code_mem_address + 0xb);
+                            ok((char *)ctx.Eip == (char *)code_mem_address + 0xb, "Eip at 0x%x instead of %p\n",
+                                ctx.Eip, (char *)code_mem_address + 0xb);
                         /* here we handle exception */
                     }
                 }
@@ -1663,245 +1660,9 @@ static void test_thread_context(void)
 #undef COMPARE
 }
 
-static BYTE saved_KiUserExceptionDispatcher_bytes[7];
-static void *pKiUserExceptionDispatcher;
-static BOOL hook_called;
-static void *hook_KiUserExceptionDispatcher_eip;
-static void *dbg_except_continue_handler_eip;
-static void *hook_exception_address;
-
-static struct
-{
-    DWORD old_eax;
-    DWORD old_edx;
-    DWORD old_esi;
-    DWORD old_edi;
-    DWORD old_ebp;
-    DWORD old_esp;
-    DWORD new_eax;
-    DWORD new_edx;
-    DWORD new_esi;
-    DWORD new_edi;
-    DWORD new_ebp;
-    DWORD new_esp;
-}
-test_kiuserexceptiondispatcher_regs;
-
-static DWORD dbg_except_continue_handler(EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_RECORD *frame,
-        CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher)
-{
-    ok(hook_called, "Hook was not called.\n");
-
-    ok(rec->ExceptionCode == 0x80000003, "Got unexpected ExceptionCode %#x.\n", rec->ExceptionCode);
-
-    got_exception = 1;
-    dbg_except_continue_handler_eip = (void *)context->Eip;
-    ++context->Eip;
-
-    context->Eip = (DWORD)code_mem + 0x1c;
-    context->Eax = 0xdeadbeef;
-    context->Esi = 0xdeadbeef;
-    pRtlUnwind(NtCurrentTeb()->Tib.ExceptionList, (void *)context->Eip, rec, (void *)0xdeadbeef);
-    return ExceptionContinueExecution;
-}
-
-static LONG WINAPI dbg_except_continue_vectored_handler(struct _EXCEPTION_POINTERS *e)
-{
-    EXCEPTION_RECORD *rec = e->ExceptionRecord;
-    CONTEXT *context = e->ContextRecord;
-
-    trace("dbg_except_continue_vectored_handler, code %#x, eip %#x, ExceptionAddress %p.\n",
-            rec->ExceptionCode, context->Eip, rec->ExceptionAddress);
-
-    ok(rec->ExceptionCode == 0x80000003, "Got unexpected ExceptionCode %#x.\n", rec->ExceptionCode);
-
-    got_exception = 1;
-
-    if ((ULONG_PTR)rec->ExceptionAddress == context->Eip + 1)
-    {
-        /* XP and Vista+ have ExceptionAddress == Eip + 1, Eip is adjusted even
-         * for software raised breakpoint exception.
-         * Win2003 has Eip not adjusted and matching ExceptionAddress.
-         * Win2008 has Eip not adjuated and ExceptionAddress not filled for
-         * software raised exception. */
-        context->Eip = (ULONG_PTR)rec->ExceptionAddress;
-    }
-
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-/* Use CDECL to leave arguments on stack. */
-void CDECL hook_KiUserExceptionDispatcher(EXCEPTION_RECORD *rec, CONTEXT *context)
-{
-    trace("rec %p, context %p.\n", rec, context);
-    trace("context->Eip %#x, context->Esp %#x, ContextFlags %#x.\n",
-            context->Eip, context->Esp, context->ContextFlags);
-
-    hook_called = TRUE;
-    /* Broken on Win2008, probably rec offset in stack is different. */
-    ok(rec->ExceptionCode == 0x80000003 || broken(!rec->ExceptionCode),
-            "Got unexpected ExceptionCode %#x.\n", rec->ExceptionCode);
-
-    hook_KiUserExceptionDispatcher_eip = (void *)context->Eip;
-    hook_exception_address = rec->ExceptionAddress;
-    memcpy(pKiUserExceptionDispatcher, saved_KiUserExceptionDispatcher_bytes,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
-}
-
-static void test_kiuserexceptiondispatcher(void)
-{
-    PVOID vectored_handler;
-    HMODULE hntdll = GetModuleHandleA("ntdll.dll");
-    static BYTE except_code[] =
-    {
-        0xb9, /* mov imm32, %ecx */
-        /* offset: 0x1 */
-        0x00, 0x00, 0x00, 0x00,
-
-        0x89, 0x01,       /* mov %eax, (%ecx) */
-        0x89, 0x51, 0x04, /* mov %edx, 0x4(%ecx) */
-        0x89, 0x71, 0x08, /* mov %esi, 0x8(%ecx) */
-        0x89, 0x79, 0x0c, /* mov %edi, 0xc(%ecx) */
-        0x89, 0x69, 0x10, /* mov %ebp, 0x10(%ecx) */
-        0x89, 0x61, 0x14, /* mov %esp, 0x14(%ecx) */
-        0x83, 0xc1, 0x18, /* add $0x18, %ecx */
-
-        /* offset: 0x19 */
-        0xcc,  /* int3 */
-
-        0x0f, 0x0b, /* ud2, illegal instruction */
-
-        /* offset: 0x1c */
-        0xb9, /* mov imm32, %ecx */
-        /* offset: 0x1d */
-        0x00, 0x00, 0x00, 0x00,
-
-        0x89, 0x01,       /* mov %eax, (%ecx) */
-        0x89, 0x51, 0x04, /* mov %edx, 0x4(%ecx) */
-        0x89, 0x71, 0x08, /* mov %esi, 0x8(%ecx) */
-        0x89, 0x79, 0x0c, /* mov %edi, 0xc(%ecx) */
-        0x89, 0x69, 0x10, /* mov %ebp, 0x10(%ecx) */
-        0x89, 0x61, 0x14, /* mov %esp, 0x14(%ecx) */
-
-        0x67, 0x48, 0x8b, 0x71, 0xf0, /* mov -0x10(%ecx),%esi */
-
-        0xc3,  /* ret  */
-    };
-    static BYTE hook_trampoline[] =
-    {
-        0xff, 0x15,
-        /* offset: 2 bytes */
-        0x00, 0x00, 0x00, 0x00,     /* callq *addr */ /* call hook implementation. */
-
-        0xff, 0x25,
-        /* offset: 8 bytes */
-        0x00, 0x00, 0x00, 0x00,     /* jmpq *addr */ /* jump to original function. */
-    };
-    void *phook_KiUserExceptionDispatcher = hook_KiUserExceptionDispatcher;
-    BYTE patched_KiUserExceptionDispatcher_bytes[7];
-    void *phook_trampoline = hook_trampoline;
-    DWORD old_protect1, old_protect2;
-    EXCEPTION_RECORD record;
-    void *bpt_address;
-    BYTE *ptr;
-    BOOL ret;
-
-    pKiUserExceptionDispatcher = (void *)GetProcAddress(hntdll, "KiUserExceptionDispatcher");
-    if (!pKiUserExceptionDispatcher)
-    {
-        win_skip("KiUserExceptionDispatcher is not available.\n");
-        return;
-    }
-
-    if (!pRtlUnwind)
-    {
-        win_skip("RtlUnwind is not available.\n");
-        return;
-    }
-
-    *(DWORD *)(except_code + 1) = (DWORD)&test_kiuserexceptiondispatcher_regs;
-    *(DWORD *)(except_code + 0x1d) = (DWORD)&test_kiuserexceptiondispatcher_regs.new_eax;
-
-    *(unsigned int *)(hook_trampoline + 2) = (ULONG_PTR)&phook_KiUserExceptionDispatcher;
-    *(unsigned int *)(hook_trampoline + 8) = (ULONG_PTR)&pKiUserExceptionDispatcher;
-
-    ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), PAGE_EXECUTE_READWRITE, &old_protect1);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
-
-    ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            PAGE_EXECUTE_READWRITE, &old_protect2);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
-
-    memcpy(saved_KiUserExceptionDispatcher_bytes, pKiUserExceptionDispatcher,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
-
-    ptr = patched_KiUserExceptionDispatcher_bytes;
-    /* mov hook_trampoline, %eax */
-    *ptr++ = 0xa1;
-    *(void **)ptr = &phook_trampoline;
-    ptr += sizeof(void *);
-    /* jmp *eax */
-    *ptr++ = 0xff;
-    *ptr++ = 0xe0;
-
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
-    got_exception = 0;
-    run_exception_test(dbg_except_continue_handler, NULL, except_code, ARRAY_SIZE(except_code),
-            PAGE_EXECUTE_READ);
-
-    ok(got_exception, "Handler was not called.\n");
-    ok(hook_called, "Hook was not called.\n");
-
-    ok(test_kiuserexceptiondispatcher_regs.new_eax == 0xdeadbeef, "Got unexpected eax %#x.\n",
-            test_kiuserexceptiondispatcher_regs.new_eax);
-    ok(test_kiuserexceptiondispatcher_regs.new_esi == 0xdeadbeef, "Got unexpected esi %#x.\n",
-            test_kiuserexceptiondispatcher_regs.new_esi);
-    ok(test_kiuserexceptiondispatcher_regs.old_edi
-            == test_kiuserexceptiondispatcher_regs.new_edi, "edi does not match.\n");
-    ok(test_kiuserexceptiondispatcher_regs.old_ebp
-            == test_kiuserexceptiondispatcher_regs.new_ebp, "ebp does not match.\n");
-
-    bpt_address = (BYTE *)code_mem + 0x19;
-
-    ok(hook_exception_address == bpt_address || broken(!hook_exception_address) /* Win2008 */,
-            "Got unexpected exception address %p, expected %p.\n",
-            hook_exception_address, bpt_address);
-    ok(hook_KiUserExceptionDispatcher_eip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            hook_KiUserExceptionDispatcher_eip, bpt_address);
-    ok(dbg_except_continue_handler_eip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            dbg_except_continue_handler_eip, bpt_address);
-
-    record.ExceptionCode = 0x80000003;
-    record.ExceptionFlags = 0;
-    record.ExceptionRecord = NULL;
-    record.ExceptionAddress = NULL; /* does not matter, copied return address */
-    record.NumberParameters = 0;
-
-    vectored_handler = AddVectoredExceptionHandler(TRUE, dbg_except_continue_vectored_handler);
-
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
-    got_exception = 0;
-    hook_called = FALSE;
-
-    pRtlRaiseException(&record);
-
-    ok(got_exception, "Handler was not called.\n");
-    ok(hook_called || broken(!hook_called) /* 2003 */, "Hook was not called.\n");
-
-    memcpy(pKiUserExceptionDispatcher, saved_KiUserExceptionDispatcher_bytes,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
-
-    RemoveVectoredExceptionHandler(vectored_handler);
-    ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            old_protect2, &old_protect2);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
-    ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), old_protect1, &old_protect1);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
-}
-
 #elif defined(__x86_64__)
+
+#define is_wow64 0
 
 #define UNW_FLAG_NHANDLER  0
 #define UNW_FLAG_EHANDLER  1
@@ -1935,7 +1696,6 @@ struct unwind_test
     const BYTE *unwind_info;
     const struct results *results;
     unsigned int nb_results;
-    const struct results *broken_results;
 };
 
 enum regs
@@ -1960,11 +1720,10 @@ static void call_virtual_unwind( int testnum, const struct unwind_test *test )
     CONTEXT context;
     RUNTIME_FUNCTION runtime_func;
     KNONVOLATILE_CONTEXT_POINTERS ctx_ptr;
-    UINT i, j, k, broken_k;
+    UINT i, j, k;
     ULONG64 fake_stack[256];
     ULONG64 frame, orig_rip, orig_rbp, unset_reg;
     UINT unwind_size = 4 + 2 * test->unwind_info[2] + 8;
-    void *expected_handler, *broken_handler;
 
     memcpy( (char *)code_mem + code_offset, test->function, test->function_size );
     memcpy( (char *)code_mem + unwind_offset, test->unwind_info, unwind_size );
@@ -1993,24 +1752,23 @@ static void call_virtual_unwind( int testnum, const struct unwind_test *test )
         data = (void *)0xdeadbeef;
         handler = RtlVirtualUnwind( UNW_FLAG_EHANDLER, (ULONG64)code_mem, orig_rip,
                                     &runtime_func, &context, &data, &frame, &ctx_ptr );
-
-        expected_handler = test->results[i].handler ? (char *)code_mem + 0x200 : NULL;
-        broken_handler = test->broken_results && test->broken_results[i].handler ? (char *)code_mem + 0x200 : NULL;
-
-        ok( handler == expected_handler || broken( test->broken_results && handler == broken_handler ),
-                "%u/%u: wrong handler %p/%p\n", testnum, i, handler, expected_handler );
-        if (handler)
-            ok( *(DWORD *)data == 0x08070605, "%u/%u: wrong handler data %p\n", testnum, i, data );
+        if (test->results[i].handler)
+        {
+            ok( (char *)handler == (char *)code_mem + 0x200,
+                "%u/%u: wrong handler %p/%p\n", testnum, i, handler, (char *)code_mem + 0x200 );
+            if (handler) ok( *(DWORD *)data == 0x08070605,
+                             "%u/%u: wrong handler data %p\n", testnum, i, data );
+        }
         else
+        {
+            ok( handler == NULL, "%u/%u: handler %p instead of NULL\n", testnum, i, handler );
             ok( data == (void *)0xdeadbeef, "%u/%u: handler data set to %p\n", testnum, i, data );
+        }
 
-        ok( context.Rip == test->results[i].rip
-                || broken( test->broken_results && context.Rip == test->broken_results[i].rip ),
-                "%u/%u: wrong rip %p/%x\n", testnum, i, (void *)context.Rip, test->results[i].rip );
-        ok( frame == (ULONG64)fake_stack + test->results[i].frame
-                || broken( test->broken_results && frame == (ULONG64)fake_stack + test->broken_results[i].frame ),
-                "%u/%u: wrong frame %p/%p\n",
-                testnum, i, (void *)frame, (char *)fake_stack + test->results[i].frame );
+        ok( context.Rip == test->results[i].rip, "%u/%u: wrong rip %p/%x\n",
+            testnum, i, (void *)context.Rip, test->results[i].rip );
+        ok( frame == (ULONG64)fake_stack + test->results[i].frame, "%u/%u: wrong frame %p/%p\n",
+            testnum, i, (void *)frame, (char *)fake_stack + test->results[i].frame );
 
         for (j = 0; j < 16; j++)
         {
@@ -2026,59 +1784,28 @@ static void call_virtual_unwind( int testnum, const struct unwind_test *test )
                 if (test->results[i].regs[k][0] == j) break;
             }
 
-            if (test->broken_results)
-            {
-                for (broken_k = 0; broken_k < nb_regs; broken_k++)
-                {
-                    if (test->broken_results[i].regs[broken_k][0] == -1)
-                    {
-                        broken_k = nb_regs;
-                        break;
-                    }
-                    if (test->broken_results[i].regs[broken_k][0] == j)
-                        break;
-                }
-            }
-            else
-            {
-                broken_k = k;
-            }
-
             if (j == rsp)  /* rsp is special */
             {
-                ULONG64 expected_rsp, broken_rsp;
-
-                ok( !ctx_ptr.IntegerContext[j],
+                ok( !ctx_ptr.u2.IntegerContext[j],
                     "%u/%u: rsp should not be set in ctx_ptr\n", testnum, i );
-                expected_rsp = test->results[i].regs[k][1] < 0
-                        ? -test->results[i].regs[k][1] : (ULONG64)fake_stack + test->results[i].regs[k][1];
-                if (test->broken_results)
-                    broken_rsp = test->broken_results[i].regs[k][1] < 0
-                            ? -test->broken_results[i].regs[k][1]
-                            : (ULONG64)fake_stack + test->broken_results[i].regs[k][1];
-                else
-                    broken_rsp = expected_rsp;
-
-                ok( context.Rsp == expected_rsp || broken( context.Rsp == broken_rsp ),
+                ok( context.Rsp == (ULONG64)fake_stack + test->results[i].regs[k][1],
                     "%u/%u: register rsp wrong %p/%p\n",
-                    testnum, i, (void *)context.Rsp, (void *)expected_rsp );
+                    testnum, i, (void *)context.Rsp, (char *)fake_stack + test->results[i].regs[k][1] );
                 continue;
             }
 
-            if (ctx_ptr.IntegerContext[j])
+            if (ctx_ptr.u2.IntegerContext[j])
             {
-                ok( k < nb_regs || broken( broken_k < nb_regs ), "%u/%u: register %s should not be set to %lx\n",
+                ok( k < nb_regs, "%u/%u: register %s should not be set to %lx\n",
                     testnum, i, reg_names[j], *(&context.Rax + j) );
-                ok( k == nb_regs || *(&context.Rax + j) == test->results[i].regs[k][1]
-                        || broken( broken_k == nb_regs || *(&context.Rax + j)
-                        == test->broken_results[i].regs[broken_k][1] ),
+                if (k < nb_regs)
+                    ok( *(&context.Rax + j) == test->results[i].regs[k][1],
                         "%u/%u: register %s wrong %p/%x\n",
                         testnum, i, reg_names[j], (void *)*(&context.Rax + j), test->results[i].regs[k][1] );
             }
             else
             {
-                ok( k == nb_regs || broken( broken_k == nb_regs ), "%u/%u: register %s should be set\n",
-                        testnum, i, reg_names[j] );
+                ok( k == nb_regs, "%u/%u: register %s should be set\n", testnum, i, reg_names[j] );
                 if (j == rbp)
                     ok( context.Rbp == orig_rbp, "%u/%u: register rbp wrong %p/unset\n",
                         testnum, i, (void *)context.Rbp );
@@ -2197,93 +1924,10 @@ static void test_virtual_unwind(void)
         { 0x16,  0x50,  FALSE, 0x000, 0x000, { {rsp,0x008}, {-1,-1} }},
     };
 
-    static const BYTE function_2[] =
-    {
-        0x55,                     /* 00: push %rbp */
-        0x90, 0x90,               /* 01: nop; nop */
-        0x5d,                     /* 03: pop %rbp */
-        0xc3                      /* 04: ret */
-     };
-
-    static const BYTE unwind_info_2[] =
-    {
-        1 | (UNW_FLAG_EHANDLER << 3),  /* version + flags */
-        0x0,                           /* prolog size */
-        2,                             /* opcode count */
-        0,                             /* frame reg */
-
-        0x01, UWOP(PUSH_NONVOL, rbp), /* 02: push %rbp */
-        0x00, UWOP(PUSH_MACHFRAME, 0), /* 00 */
-
-        0x00, 0x02, 0x00, 0x00,  /* handler */
-        0x05, 0x06, 0x07, 0x08,  /* data */
-    };
-
-    static const struct results results_2[] =
-    {
-      /* offset  rbp   handler  rip   frame   registers */
-        { 0x01,  0x50,  TRUE, 0x008, 0x000, { {rsp,-0x020}, {rbp,0x000}, {-1,-1} }},
-    };
-
-    static const BYTE unwind_info_3[] =
-    {
-        1 | (UNW_FLAG_EHANDLER << 3),  /* version + flags */
-        0x0,                           /* prolog size */
-        2,                             /* opcode count */
-        0,                             /* frame reg */
-
-        0x01, UWOP(PUSH_NONVOL, rbp), /* 02: push %rbp */
-        0x00, UWOP(PUSH_MACHFRAME, 1), /* 00 */
-
-        0x00, 0x02, 0x00, 0x00,  /* handler */
-        0x05, 0x06, 0x07, 0x08,  /* data */
-    };
-
-    static const struct results results_3[] =
-    {
-      /* offset  rbp   handler  rip   frame   registers */
-        { 0x01,  0x50,  TRUE, 0x010, 0x000, { {rsp,-0x028}, {rbp,0x000}, {-1,-1} }},
-    };
-
-    static const BYTE function_4[] =
-    {
-        0x55,                     /* 00: push %rbp */
-        0x5d,                     /* 01: pop %rbp */
-        0xc3                      /* 02: ret */
-     };
-
-    static const BYTE unwind_info_4[] =
-    {
-        1 | (UNW_FLAG_EHANDLER << 3),  /* version + flags */
-        0x0,                           /* prolog size */
-        0,                             /* opcode count */
-        0,                             /* frame reg */
-
-        0x00, 0x02, 0x00, 0x00,  /* handler */
-        0x05, 0x06, 0x07, 0x08,  /* data */
-    };
-
-    static const struct results results_4[] =
-    {
-      /* offset  rbp   handler  rip   frame   registers */
-        { 0x01,  0x50,  TRUE, 0x000, 0x000, { {rsp,0x008}, {-1,-1} }},
-    };
-
-    static const struct results broken_results_4[] =
-    {
-      /* offset  rbp   handler  rip   frame   registers */
-        { 0x01,  0x50,  FALSE, 0x008, 0x000, { {rsp,0x010}, {rbp,0x000}, {-1,-1} }},
-    };
-
     static const struct unwind_test tests[] =
     {
         { function_0, sizeof(function_0), unwind_info_0, results_0, ARRAY_SIZE(results_0) },
-        { function_1, sizeof(function_1), unwind_info_1, results_1, ARRAY_SIZE(results_1) },
-        { function_2, sizeof(function_2), unwind_info_2, results_2, ARRAY_SIZE(results_2) },
-        { function_2, sizeof(function_2), unwind_info_3, results_3, ARRAY_SIZE(results_3) },
-
-        /* Broken before Win10 1809. */
-        { function_4, sizeof(function_4), unwind_info_4, results_4, ARRAY_SIZE(results_4), broken_results_4 },
+        { function_1, sizeof(function_1), unwind_info_1, results_1, ARRAY_SIZE(results_1) }
     };
     unsigned int i;
 
@@ -2360,13 +2004,13 @@ static void test_restore_context(void)
         fltsave = &buf.Xmm6;
         for (i = 0; i < 10; i++)
         {
-            ok(fltsave[i].Part[0] == ctx.FltSave.XmmRegisters[i + 6].Low,
+            ok(fltsave[i].Part[0] == ctx.u.FltSave.XmmRegisters[i + 6].Low,
                 "longjmp failed for Xmm%d, expected %lx, got %lx\n", i + 6,
-                fltsave[i].Part[0], ctx.FltSave.XmmRegisters[i + 6].Low);
+                fltsave[i].Part[0], ctx.u.FltSave.XmmRegisters[i + 6].Low);
 
-            ok(fltsave[i].Part[1] == ctx.FltSave.XmmRegisters[i + 6].High,
+            ok(fltsave[i].Part[1] == ctx.u.FltSave.XmmRegisters[i + 6].High,
                 "longjmp failed for Xmm%d, expected %lx, got %lx\n", i + 6,
-                fltsave[i].Part[1], ctx.FltSave.XmmRegisters[i + 6].High);
+                fltsave[i].Part[1], ctx.u.FltSave.XmmRegisters[i + 6].High);
         }
     }
     else
@@ -2980,572 +2624,6 @@ static void test_dpe_exceptions(void)
     pRtlRemoveVectoredExceptionHandler(handler);
 }
 
-static const BYTE call_one_arg_code[] = {
-    0x55, /* push %rbp */
-    0x48, 0x89, 0xe5, /* mov %rsp,%rbp */
-    0x48, 0x83, 0xec, 0x20, /* sub $0x20,%rsp */
-    0x48, 0x89, 0xc8, /* mov %rcx,%rax */
-    0x48, 0x89, 0xd1, /* mov %rdx,%rcx */
-    0xff, 0xd0, /* callq *%rax */
-    0x90, /* nop */
-    0x90, /* nop */
-    0x90, /* nop */
-    0x90, /* nop */
-    0x48, 0x83, 0xc4, 0x20, /* add $0x20,%rsp */
-    0x5d, /* pop %rbp */
-    0xc3, /* retq  */
-};
-
-static int rtlraiseexception_unhandled_handler_called;
-static int rtlraiseexception_handler_called;
-
-static void rtlraiseexception_handler_( EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_RECORD *frame,
-                                        CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher,
-                                        BOOL unhandled_handler )
-{
-    if (unhandled_handler) rtlraiseexception_unhandled_handler_called = 1;
-    else rtlraiseexception_handler_called = 1;
-
-    trace( "exception: %08x flags:%x addr:%p context: Rip:%p\n",
-           rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, (void *)context->Rip );
-
-    ok( rec->ExceptionAddress == (char *)code_mem + 0x10
-        || broken( rec->ExceptionAddress == code_mem || !rec->ExceptionAddress ) /* 2008 */,
-        "ExceptionAddress at %p instead of %p\n", rec->ExceptionAddress, (char *)code_mem + 0x10 );
-
-    ok( context->ContextFlags == CONTEXT_ALL || context->ContextFlags == (CONTEXT_ALL | CONTEXT_XSTATE)
-        || context->ContextFlags == (CONTEXT_FULL | CONTEXT_SEGMENTS)
-        || context->ContextFlags == (CONTEXT_FULL | CONTEXT_SEGMENTS | CONTEXT_XSTATE),
-        "wrong context flags %x\n", context->ContextFlags );
-
-    /* check that pc is fixed up only for EXCEPTION_BREAKPOINT
-     * even if raised by RtlRaiseException
-     */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage)
-        ok( context->Rip == (UINT_PTR)code_mem + 0xf,
-            "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)code_mem + 0xf );
-    else
-        ok( context->Rip == (UINT_PTR)code_mem + 0x10,
-            "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)code_mem + 0x10 );
-
-    if (have_vectored_api) ok( context->Rax == 0xf00f00f0, "context->Rax is %Ix, should have been set to 0xf00f00f0 in vectored handler\n", context->Rax );
-
-    /* give the debugger a chance to examine the state a second time */
-    /* without the exception handler changing pc */
-    if (test_stage == 2)
-        return;
-
-    /* pc in context is decreased by 1
-     * Increase it again, else execution will continue in the middle of an instruction */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && (context->Rip == (UINT_PTR)code_mem + 0xf))
-        context->Rip++;
-}
-
-static LONG CALLBACK rtlraiseexception_unhandled_handler(EXCEPTION_POINTERS *ExceptionInfo)
-{
-    PCONTEXT context = ExceptionInfo->ContextRecord;
-    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
-    rtlraiseexception_handler_(rec, NULL, context, NULL, TRUE);
-    if (test_stage == 2) return EXCEPTION_CONTINUE_SEARCH;
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-static DWORD rtlraiseexception_handler( EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_RECORD *frame,
-                                        CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher )
-{
-    rtlraiseexception_handler_(rec, frame, context, dispatcher, FALSE);
-    if (test_stage == 2) return ExceptionContinueSearch;
-    return ExceptionContinueExecution;
-}
-
-static LONG CALLBACK rtlraiseexception_vectored_handler(EXCEPTION_POINTERS *ExceptionInfo)
-{
-    PCONTEXT context = ExceptionInfo->ContextRecord;
-    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
-
-    trace( "vect. handler %08x addr:%p Rip:%p\n", rec->ExceptionCode, rec->ExceptionAddress, (void *)context->Rip );
-
-    ok( rec->ExceptionAddress == (char *)code_mem + 0x10
-        || broken(rec->ExceptionAddress == code_mem || !rec->ExceptionAddress ) /* 2008 */,
-        "ExceptionAddress at %p instead of %p\n", rec->ExceptionAddress, (char *)code_mem + 0x10 );
-
-    /* check that Rip is fixed up only for EXCEPTION_BREAKPOINT
-     * even if raised by RtlRaiseException
-     */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage)
-        ok( context->Rip == (UINT_PTR)code_mem + 0xf,
-            "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)code_mem + 0xf );
-    else
-        ok( context->Rip == (UINT_PTR)code_mem + 0x10,
-            "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)code_mem + 0x10 );
-
-    /* test if context change is preserved from vectored handler to stack handlers */
-    context->Rax = 0xf00f00f0;
-
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void run_rtlraiseexception_test(DWORD exceptioncode)
-{
-    EXCEPTION_REGISTRATION_RECORD frame;
-    EXCEPTION_RECORD record;
-    PVOID vectored_handler = NULL;
-
-    void (CDECL *func)(void* function, EXCEPTION_RECORD* record) = code_mem;
-
-    record.ExceptionCode = exceptioncode;
-    record.ExceptionFlags = 0;
-    record.ExceptionRecord = NULL;
-    record.ExceptionAddress = NULL; /* does not matter, copied return address */
-    record.NumberParameters = 0;
-
-    frame.Handler = rtlraiseexception_handler;
-    frame.Prev = NtCurrentTeb()->Tib.ExceptionList;
-
-    memcpy(code_mem, call_one_arg_code, sizeof(call_one_arg_code));
-
-    NtCurrentTeb()->Tib.ExceptionList = &frame;
-    if (have_vectored_api)
-    {
-        vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &rtlraiseexception_vectored_handler);
-        ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
-    }
-    if (pRtlSetUnhandledExceptionFilter) pRtlSetUnhandledExceptionFilter(&rtlraiseexception_unhandled_handler);
-
-    rtlraiseexception_handler_called = 0;
-    rtlraiseexception_unhandled_handler_called = 0;
-    func(pRtlRaiseException, &record);
-    ok( record.ExceptionAddress == (char *)code_mem + 0x10,
-        "address set to %p instead of %p\n", record.ExceptionAddress, (char *)code_mem + 0x10 );
-
-    todo_wine
-    ok( !rtlraiseexception_handler_called, "Frame handler called\n" );
-    todo_wine
-    ok( rtlraiseexception_unhandled_handler_called, "UnhandledExceptionFilter wasn't called\n" );
-
-    if (have_vectored_api)
-        pRtlRemoveVectoredExceptionHandler(vectored_handler);
-
-    if (pRtlSetUnhandledExceptionFilter) pRtlSetUnhandledExceptionFilter(NULL);
-    NtCurrentTeb()->Tib.ExceptionList = frame.Prev;
-}
-
-static void test_rtlraiseexception(void)
-{
-    if (!pRtlRaiseException)
-    {
-        skip("RtlRaiseException not found\n");
-        return;
-    }
-
-    /* test without debugger */
-    run_rtlraiseexception_test(0x12345);
-    run_rtlraiseexception_test(EXCEPTION_BREAKPOINT);
-    run_rtlraiseexception_test(EXCEPTION_INVALID_HANDLE);
-}
-
-static void test_debugger(void)
-{
-    char cmdline[MAX_PATH];
-    PROCESS_INFORMATION pi;
-    STARTUPINFOA si = { 0 };
-    DEBUG_EVENT de;
-    DWORD continuestatus;
-    PVOID code_mem_address = NULL;
-    NTSTATUS status;
-    SIZE_T size_read;
-    BOOL ret;
-    int counter = 0;
-    si.cb = sizeof(si);
-
-    if(!pNtGetContextThread || !pNtSetContextThread || !pNtReadVirtualMemory || !pNtTerminateProcess)
-    {
-        skip("NtGetContextThread, NtSetContextThread, NtReadVirtualMemory or NtTerminateProcess not found\n");
-        return;
-    }
-
-    sprintf(cmdline, "%s %s %s %p", my_argv[0], my_argv[1], "debuggee", &test_stage);
-    ret = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, DEBUG_PROCESS, NULL, NULL, &si, &pi);
-    ok(ret, "could not create child process error: %u\n", GetLastError());
-    if (!ret)
-        return;
-
-    do
-    {
-        continuestatus = DBG_CONTINUE;
-        ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
-
-        ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
-        ok(!ret, "ContinueDebugEvent unexpectedly succeeded\n");
-        ok(GetLastError() == ERROR_INVALID_PARAMETER, "Unexpected last error: %u\n", GetLastError());
-
-        if (de.dwThreadId != pi.dwThreadId)
-        {
-            trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
-            continue;
-        }
-
-        if (de.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT)
-        {
-            if(de.u.CreateProcessInfo.lpBaseOfImage != NtCurrentTeb()->Peb->ImageBaseAddress)
-            {
-                skip("child process loaded at different address, terminating it\n");
-                pNtTerminateProcess(pi.hProcess, 0);
-            }
-        }
-        else if (de.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
-        {
-            CONTEXT ctx;
-            int stage;
-
-            counter++;
-            status = pNtReadVirtualMemory(pi.hProcess, &code_mem, &code_mem_address,
-                                          sizeof(code_mem_address), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ctx.ContextFlags = CONTEXT_FULL;
-            status = pNtGetContextThread(pi.hThread, &ctx);
-            ok(!status, "NtGetContextThread failed with 0x%x\n", status);
-
-            trace("exception 0x%x at %p firstchance=%d Rip=%p, Rax=%p\n",
-                  de.u.Exception.ExceptionRecord.ExceptionCode,
-                  de.u.Exception.ExceptionRecord.ExceptionAddress,
-                  de.u.Exception.dwFirstChance, (char *)ctx.Rip, (char *)ctx.Rax);
-
-            if (counter > 100)
-            {
-                ok(FALSE, "got way too many exceptions, probably caught in an infinite loop, terminating child\n");
-                pNtTerminateProcess(pi.hProcess, 1);
-            }
-            else if (counter >= 2) /* skip startup breakpoint */
-            {
-                if (stage == 1)
-                {
-                    ok((char *)ctx.Rip == (char *)code_mem_address + 0x10, "Rip at %p instead of %p\n",
-                       (char *)ctx.Rip, (char *)code_mem_address + 0x10);
-                    /* setting the context from debugger does not affect the context that the
-                     * exception handler gets, except on w2008 */
-                    ctx.Rip = (UINT_PTR)code_mem_address + 0x12;
-                    ctx.Rax = 0xf00f00f1;
-                    /* let the debuggee handle the exception */
-                    continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 2)
-                {
-                    if (de.u.Exception.dwFirstChance)
-                    {
-                        ok((char *)ctx.Rip == (char *)code_mem_address + 0x10, "Rip at %p instead of %p\n",
-                           (char *)ctx.Rip, (char *)code_mem_address + 0x10);
-                        /* setting the context from debugger does not affect the context that the
-                         * exception handler gets, except on w2008 */
-                        ctx.Rip = (UINT_PTR)code_mem_address + 0x12;
-                        ctx.Rax = 0xf00f00f1;
-                        /* pass exception to debuggee
-                         * exception will not be handled and a second chance exception will be raised */
-                        continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                    }
-                    else
-                    {
-                        /* debugger gets context after exception handler has played with it */
-                        if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
-                        {
-                            ok((char *)ctx.Rip == (char *)code_mem_address + 0xf, "Rip at %p instead of %p\n",
-                               (char *)ctx.Rip, (char *)code_mem_address + 0xf);
-                            ctx.Rip += 1;
-                        }
-                        else ok((char *)ctx.Rip == (char *)code_mem_address + 0x10, "Rip at 0x%x instead of %p\n",
-                                ctx.Rip, (char *)code_mem_address + 0x10);
-                        /* here we handle exception */
-                    }
-                }
-                else if (stage == 7 || stage == 8)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Rip == (char *)code_mem_address + 0x30,
-                       "expected Rip = %p, got %p\n", (char *)code_mem_address + 0x30, (char *)ctx.Rip);
-                    if (stage == 8) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 9 || stage == 10)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Rip == (char *)code_mem_address + 2,
-                       "expected Rip = %p, got %p\n", (char *)code_mem_address + 2, (char *)ctx.Rip);
-                    if (stage == 10) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 11 || stage == 12 || stage == 13)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_INVALID_HANDLE,
-                       "unexpected exception code %08x, expected %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode,
-                       EXCEPTION_INVALID_HANDLE);
-                    ok(de.u.Exception.ExceptionRecord.NumberParameters == 0,
-                       "unexpected number of parameters %d, expected 0\n", de.u.Exception.ExceptionRecord.NumberParameters);
-
-                    if (stage == 12|| stage == 13) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else
-                    ok(FALSE, "unexpected stage %x\n", stage);
-
-                status = pNtSetContextThread(pi.hThread, &ctx);
-                ok(!status, "NtSetContextThread failed with 0x%x\n", status);
-            }
-        }
-        else if (de.dwDebugEventCode == OUTPUT_DEBUG_STRING_EVENT)
-        {
-            int stage;
-            char buffer[64];
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ok(!de.u.DebugString.fUnicode, "unexpected unicode debug string event\n");
-            ok(de.u.DebugString.nDebugStringLength < sizeof(buffer) - 1, "buffer not large enough to hold %d bytes\n",
-               de.u.DebugString.nDebugStringLength);
-
-            memset(buffer, 0, sizeof(buffer));
-            status = pNtReadVirtualMemory(pi.hProcess, de.u.DebugString.lpDebugStringData, buffer,
-                                          de.u.DebugString.nDebugStringLength, &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 3 || stage == 4)
-                ok(!strcmp(buffer, "Hello World"), "got unexpected debug string '%s'\n", buffer);
-            else /* ignore unrelated debug strings like 'SHIMVIEW: ShimInfo(Complete)' */
-                ok(strstr(buffer, "SHIMVIEW") != NULL, "unexpected stage %x, got debug string event '%s'\n", stage, buffer);
-
-            if (stage == 4) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-        else if (de.dwDebugEventCode == RIP_EVENT)
-        {
-            int stage;
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 5 || stage == 6)
-            {
-                ok(de.u.RipInfo.dwError == 0x11223344, "got unexpected rip error code %08x, expected %08x\n",
-                   de.u.RipInfo.dwError, 0x11223344);
-                ok(de.u.RipInfo.dwType  == 0x55667788, "got unexpected rip type %08x, expected %08x\n",
-                   de.u.RipInfo.dwType, 0x55667788);
-            }
-            else
-                ok(FALSE, "unexpected stage %x\n", stage);
-
-            if (stage == 6) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-
-        ContinueDebugEvent(de.dwProcessId, de.dwThreadId, continuestatus);
-
-    } while (de.dwDebugEventCode != EXIT_PROCESS_DEBUG_EVENT);
-
-    wait_child_process( pi.hProcess );
-    ret = CloseHandle(pi.hThread);
-    ok(ret, "error %u\n", GetLastError());
-    ret = CloseHandle(pi.hProcess);
-    ok(ret, "error %u\n", GetLastError());
-}
-
-static void test_thread_context(void)
-{
-    CONTEXT context;
-    NTSTATUS status;
-    int i;
-    struct expected
-    {
-        ULONG64 Rax, Rbx, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11,
-            R12, R13, R14, R15, Rbp, Rsp, Rip, prev_frame, EFlags;
-        ULONG MxCsr;
-        XMM_SAVE_AREA32 FltSave;
-        WORD SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
-    } expect;
-    XMM_SAVE_AREA32 broken_fltsave;
-    NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = (void *)code_mem;
-
-    static const BYTE call_func[] =
-    {
-        0x55,                                                 /* push   %rbp */
-        0x48, 0x89, 0xe5,                                     /* mov    %rsp,%rbp */
-        0x48, 0x8d, 0x64, 0x24, 0xd0,                         /* lea    -0x30(%rsp),%rsp */
-        0x49, 0x89, 0x00,                                     /* mov    %rax,(%r8) */
-        0x49, 0x89, 0x58, 0x08,                               /* mov    %rbx,0x8(%r8) */
-        0x49, 0x89, 0x48, 0x10,                               /* mov    %rcx,0x10(%r8) */
-        0x49, 0x89, 0x50, 0x18,                               /* mov    %rdx,0x18(%r8) */
-        0x49, 0x89, 0x70, 0x20,                               /* mov    %rsi,0x20(%r8) */
-        0x49, 0x89, 0x78, 0x28,                               /* mov    %rdi,0x28(%r8) */
-        0x4d, 0x89, 0x40, 0x30,                               /* mov    %r8,0x30(%r8) */
-        0x4d, 0x89, 0x48, 0x38,                               /* mov    %r9,0x38(%r8) */
-        0x4d, 0x89, 0x50, 0x40,                               /* mov    %r10,0x40(%r8) */
-        0x4d, 0x89, 0x58, 0x48,                               /* mov    %r11,0x48(%r8) */
-        0x4d, 0x89, 0x60, 0x50,                               /* mov    %r12,0x50(%r8) */
-        0x4d, 0x89, 0x68, 0x58,                               /* mov    %r13,0x58(%r8) */
-        0x4d, 0x89, 0x70, 0x60,                               /* mov    %r14,0x60(%r8) */
-        0x4d, 0x89, 0x78, 0x68,                               /* mov    %r15,0x68(%r8) */
-        0x49, 0x89, 0x68, 0x70,                               /* mov    %rbp,0x70(%r8) */
-        0x49, 0x89, 0x60, 0x78,                               /* mov    %rsp,0x78(%r8) */
-        0xff, 0x75, 0x08,                                     /* pushq  0x8(%rbp) */
-        0x41, 0x8f, 0x80, 0x80, 0x00, 0x00, 0x00,             /* popq   0x80(%r8) */
-        0xff, 0x75, 0x00,                                     /* pushq  0x0(%rbp) */
-        0x41, 0x8f, 0x80, 0x88, 0x00, 0x00, 0x00,             /* popq   0x88(%r8) */
-        0x9c,                                                 /* pushfq */
-        0x41, 0x8f, 0x80, 0x90, 0x00, 0x00, 0x00,             /* popq   0x90(%r8) */
-        0x41, 0x0f, 0xae, 0x98, 0x98, 0x00, 0x00, 0x00,       /* stmxcsr 0x98(%r8) */
-        0x41, 0x0f, 0xae, 0x80, 0xa0, 0x00, 0x00, 0x00,       /* fxsave 0xa0(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0x80, 0x40, 0x01, 0x00, 0x00, /* movdqa %xmm0,0x140(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0x88, 0x50, 0x01, 0x00, 0x00, /* movdqa %xmm1,0x150(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0x90, 0x60, 0x01, 0x00, 0x00, /* movdqa %xmm2,0x160(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0x98, 0x70, 0x01, 0x00, 0x00, /* movdqa %xmm3,0x170(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0xa0, 0x80, 0x01, 0x00, 0x00, /* movdqa %xmm4,0x180(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0xa8, 0x90, 0x01, 0x00, 0x00, /* movdqa %xmm5,0x190(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0xb0, 0xa0, 0x01, 0x00, 0x00, /* movdqa %xmm6,0x1a0(%r8) */
-        0x66, 0x41, 0x0f, 0x7f, 0xb8, 0xb0, 0x01, 0x00, 0x00, /* movdqa %xmm7,0x1b0(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0x80, 0xc0, 0x01, 0x00, 0x00, /* movdqa %xmm8,0x1c0(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0x88, 0xd0, 0x01, 0x00, 0x00, /* movdqa %xmm9,0x1d0(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0x90, 0xe0, 0x01, 0x00, 0x00, /* movdqa %xmm10,0x1e0(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0x98, 0xf0, 0x01, 0x00, 0x00, /* movdqa %xmm11,0x1f0(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0xa0, 0x00, 0x02, 0x00, 0x00, /* movdqa %xmm12,0x200(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0xa8, 0x10, 0x02, 0x00, 0x00, /* movdqa %xmm13,0x210(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0xb0, 0x20, 0x02, 0x00, 0x00, /* movdqa %xmm14,0x220(%r8) */
-        0x66, 0x45, 0x0f, 0x7f, 0xb8, 0x30, 0x02, 0x00, 0x00, /* movdqa %xmm15,0x230(%r8) */
-        0x41, 0x8c, 0x88, 0xa0, 0x02, 0x00, 0x00,             /* mov    %cs,0x2a0(%r8) */
-        0x41, 0x8c, 0x98, 0xa2, 0x02, 0x00, 0x00,             /* mov    %ds,0x2a2(%r8) */
-        0x41, 0x8c, 0x80, 0xa4, 0x02, 0x00, 0x00,             /* mov    %es,0x2a4(%r8) */
-        0x41, 0x8c, 0xa0, 0xa6, 0x02, 0x00, 0x00,             /* mov    %fs,0x2a6(%r8) */
-        0x41, 0x8c, 0xa8, 0xa8, 0x02, 0x00, 0x00,             /* mov    %gs,0x2a8(%r8) */
-        0x41, 0x8c, 0x90, 0xaa, 0x02, 0x00, 0x00,             /* mov    %ss,0x2aa(%r8) */
-        0x41, 0xff, 0xd1,                                     /* callq  *%r9 */
-        0xc9,                                                 /* leaveq */
-        0xc3,                                                 /* retq */
-    };
-
-    memcpy( func_ptr, call_func, sizeof(call_func) );
-
-#define COMPARE(reg) \
-    ok( context.reg == expect.reg, "wrong " #reg " %p/%p\n", (void *)(ULONG64)context.reg, (void *)(ULONG64)expect.reg )
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    func_ptr( &context, 0, &expect, pRtlCaptureContext );
-    trace( "expect: rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p "
-           "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p "
-           "rbp=%p rsp=%p rip=%p cs=%04x ds=%04x es=%04x fs=%04x gs=%04x ss=%04x flags=%08x prev=%08x\n",
-           (void *)expect.Rax, (void *)expect.Rbx, (void *)expect.Rcx, (void *)expect.Rdx,
-           (void *)expect.Rsi, (void *)expect.Rdi, (void *)expect.R8, (void *)expect.R9,
-           (void *)expect.R10, (void *)expect.R11, (void *)expect.R12, (void *)expect.R13,
-           (void *)expect.R14, (void *)expect.R15, (void *)expect.Rbp, (void *)expect.Rsp,
-           (void *)expect.Rip, expect.SegCs, expect.SegDs, expect.SegEs,
-           expect.SegFs, expect.SegGs, expect.SegSs, expect.EFlags, expect.prev_frame );
-    trace( "actual: rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p "
-           "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p "
-           "rbp=%p rsp=%p rip=%p cs=%04x ds=%04x es=%04x fs=%04x gs=%04x ss=%04x flags=%08x prev=%08x\n",
-           (void *)context.Rax, (void *)context.Rbx, (void *)context.Rcx, (void *)context.Rdx,
-           (void *)context.Rsi, (void *)context.Rdi, (void *)context.R8, (void *)context.R9,
-           (void *)context.R10, (void *)context.R11, (void *)context.R12, (void *)context.R13,
-           (void *)context.R14, (void *)context.R15, (void *)context.Rbp, (void *)context.Rsp,
-           (void *)context.Rip, context.SegCs, context.SegDs, context.SegEs,
-           context.SegFs, context.SegGs, context.SegSs, context.EFlags );
-
-    ok( context.ContextFlags == (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_FLOATING_POINT),
-        "wrong flags %08x\n", context.ContextFlags );
-    COMPARE( Rax );
-    COMPARE( Rbx );
-    COMPARE( Rcx );
-    COMPARE( Rdx );
-    COMPARE( Rsi );
-    COMPARE( Rdi );
-    COMPARE( R8 );
-    COMPARE( R9 );
-    COMPARE( R10 );
-    COMPARE( R11 );
-    COMPARE( R12 );
-    COMPARE( R13 );
-    COMPARE( R14 );
-    COMPARE( R15 );
-    COMPARE( Rbp );
-    COMPARE( Rsp );
-    COMPARE( EFlags );
-    COMPARE( MxCsr );
-    COMPARE( SegCs );
-    COMPARE( SegDs );
-    COMPARE( SegEs );
-    COMPARE( SegFs );
-    COMPARE( SegGs );
-    COMPARE( SegSs );
-    ok( !memcmp( &context.FltSave, &expect.FltSave, offsetof( XMM_SAVE_AREA32, XmmRegisters )),
-        "wrong FltSave\n" );
-    for (i = 0; i < 16; i++)
-        ok( !memcmp( &context.Xmm0 + i, &expect.FltSave.XmmRegisters[i], sizeof(context.Xmm0) ),
-            "wrong xmm%u\n", i );
-    /* Rip is return address from RtlCaptureContext */
-    ok( context.Rip == (ULONG64)func_ptr + sizeof(call_func) - 2,
-        "wrong Rip %p/%p\n", (void *)context.Rip, (char *)func_ptr + sizeof(call_func) - 2 );
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_FLOATING_POINT;
-
-    status = func_ptr( GetCurrentThread(), &context, &expect, pNtGetContextThread );
-    ok( status == STATUS_SUCCESS, "NtGetContextThread failed %08x\n", status );
-    trace( "expect: rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p "
-           "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p "
-           "rbp=%p rsp=%p rip=%p cs=%04x ds=%04x es=%04x fs=%04x gs=%04x ss=%04x flags=%08x prev=%08x\n",
-           (void *)expect.Rax, (void *)expect.Rbx, (void *)expect.Rcx, (void *)expect.Rdx,
-           (void *)expect.Rsi, (void *)expect.Rdi, (void *)expect.R8, (void *)expect.R9,
-           (void *)expect.R10, (void *)expect.R11, (void *)expect.R12, (void *)expect.R13,
-           (void *)expect.R14, (void *)expect.R15, (void *)expect.Rbp, (void *)expect.Rsp,
-           (void *)expect.Rip, expect.SegCs, expect.SegDs, expect.SegEs,
-           expect.SegFs, expect.SegGs, expect.SegSs, expect.EFlags, expect.prev_frame );
-    trace( "actual: rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p "
-           "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p "
-           "rbp=%p rsp=%p rip=%p cs=%04x ds=%04x es=%04x fs=%04x gs=%04x ss=%04x flags=%08x prev=%08x\n",
-           (void *)context.Rax, (void *)context.Rbx, (void *)context.Rcx, (void *)context.Rdx,
-           (void *)context.Rsi, (void *)context.Rdi, (void *)context.R8, (void *)context.R9,
-           (void *)context.R10, (void *)context.R11, (void *)context.R12, (void *)context.R13,
-           (void *)context.R14, (void *)context.R15, (void *)context.Rbp, (void *)context.Rsp,
-           (void *)context.Rip, context.SegCs, context.SegDs, context.SegEs,
-           context.SegFs, context.SegGs, context.SegSs, context.EFlags );
-    /* other registers are not preserved */
-    COMPARE( Rbx );
-    COMPARE( Rsi );
-    COMPARE( Rdi );
-    COMPARE( R12 );
-    COMPARE( R13 );
-    COMPARE( R14 );
-    COMPARE( R15 );
-    COMPARE( Rbp );
-    COMPARE( MxCsr );
-    COMPARE( SegCs );
-    COMPARE( SegDs );
-    COMPARE( SegEs );
-    COMPARE( SegFs );
-    COMPARE( SegGs );
-    COMPARE( SegSs );
-
-    broken_fltsave = context.FltSave;
-    memset( &broken_fltsave.ErrorOpcode, 0xcc, 0x12 );
-
-    ok( !memcmp( &context.FltSave, &expect.FltSave, offsetof( XMM_SAVE_AREA32, XmmRegisters )) ||
-        broken( !memcmp( &broken_fltsave, &expect.FltSave, offsetof( XMM_SAVE_AREA32, XmmRegisters )) ) /* w2008, w8 */,
-        "wrong FltSave\n" );
-    for (i = 6; i < 16; i++)
-        ok( !memcmp( &context.Xmm0 + i, &expect.FltSave.XmmRegisters[i], sizeof(context.Xmm0) ),
-            "wrong xmm%u\n", i );
-    /* Rsp is the stack upon entry to NtGetContextThread */
-    ok( context.Rsp == expect.Rsp - 8,
-        "wrong Rsp %p/%p\n", (void *)context.Rsp, (void *)expect.Rsp );
-    /* Rip is somewhere close to the NtGetContextThread implementation */
-    ok( (char *)context.Rip >= (char *)pNtGetContextThread - 0x40000 &&
-        (char *)context.Rip <= (char *)pNtGetContextThread + 0x40000,
-        "wrong Rip %p/%p\n", (void *)context.Rip, (void *)pNtGetContextThread );
-#undef COMPARE
-}
-
 static void test_wow64_context(void)
 {
     char cmdline[] = "C:\\windows\\syswow64\\notepad.exe";
@@ -3587,63 +2665,21 @@ static BOOL hook_called;
 static void *hook_KiUserExceptionDispatcher_rip;
 static void *dbg_except_continue_handler_rip;
 static void *hook_exception_address;
-static struct
-{
-    ULONG64 old_rax;
-    ULONG64 old_rdx;
-    ULONG64 old_rsi;
-    ULONG64 old_rdi;
-    ULONG64 old_rbp;
-    ULONG64 old_rsp;
-    ULONG64 new_rax;
-    ULONG64 new_rdx;
-    ULONG64 new_rsi;
-    ULONG64 new_rdi;
-    ULONG64 new_rbp;
-    ULONG64 new_rsp;
-}
-test_kiuserexceptiondispatcher_regs;
 
 static DWORD dbg_except_continue_handler(EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_RECORD *frame,
         CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher)
 {
-    trace("handler context->Rip %#lx, codemem %p.\n", context->Rip, code_mem);
+    ok(hook_called, "Hook was not called.\n");
     got_exception = 1;
     dbg_except_continue_handler_rip = (void *)context->Rip;
     ++context->Rip;
-    memcpy(pKiUserExceptionDispatcher, saved_KiUserExceptionDispatcher_bytes,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
-
-    RtlUnwind((void *)test_kiuserexceptiondispatcher_regs.old_rsp,
-            (BYTE *)code_mem + 0x28, rec, (void *)0xdeadbeef);
     return ExceptionContinueExecution;
-}
-
-static LONG WINAPI dbg_except_continue_vectored_handler(struct _EXCEPTION_POINTERS *e)
-{
-    EXCEPTION_RECORD *rec = e->ExceptionRecord;
-    CONTEXT *context = e->ContextRecord;
-
-    trace("dbg_except_continue_vectored_handler, code %#x, Rip %#lx.\n", rec->ExceptionCode, context->Rip);
-
-    ok(rec->ExceptionCode == 0x80000003, "Got unexpected exception code %#x.\n", rec->ExceptionCode);
-
-    got_exception = 1;
-    dbg_except_continue_handler_rip = (void *)context->Rip;
-    if (NtCurrentTeb()->Peb->BeingDebugged)
-        ++context->Rip;
-
-    if (context->Rip >= (ULONG64)code_mem && context->Rip < (ULONG64)code_mem + 0x100)
-        RtlUnwind((void *)test_kiuserexceptiondispatcher_regs.old_rsp,
-                (BYTE *)code_mem + 0x28, rec, (void *)0xdeadbeef);
-
-    return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 void WINAPI hook_KiUserExceptionDispatcher(EXCEPTION_RECORD *rec, CONTEXT *context)
 {
     trace("rec %p, context %p.\n", rec, context);
-    trace("context->Rip %#lx, context->Rsp %#lx, ContextFlags %#lx.\n",
+    trace("context->Rip %#lx, context->Rsp %#lx, ContextFlags %#lx.\n", sizeof(*context),
             context->Rip, context->Rsp, context->ContextFlags);
 
     hook_called = TRUE;
@@ -3653,44 +2689,15 @@ void WINAPI hook_KiUserExceptionDispatcher(EXCEPTION_RECORD *rec, CONTEXT *conte
 
     hook_KiUserExceptionDispatcher_rip = (void *)context->Rip;
     hook_exception_address = rec->ExceptionAddress;
-    memcpy(pKiUserExceptionDispatcher, saved_KiUserExceptionDispatcher_bytes,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
+    memcpy(pKiUserExceptionDispatcher, saved_KiUserExceptionDispatcher_bytes, sizeof(saved_KiUserExceptionDispatcher_bytes));
 }
 
 static void test_kiuserexceptiondispatcher(void)
 {
-    LPVOID vectored_handler;
     HMODULE hntdll = GetModuleHandleA("ntdll.dll");
-    static BYTE except_code[] =
+    static const BYTE except_code[] =
     {
-        0x48, 0xb9, /* mov imm64, %rcx */
-        /* offset: 0x2 */
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-
-        0x48, 0x89, 0x01,       /* mov %rax, (%rcx) */
-        0x48, 0x89, 0x51, 0x08, /* mov %rdx, 0x8(%rcx) */
-        0x48, 0x89, 0x71, 0x10, /* mov %rsi, 0x10(%rcx) */
-        0x48, 0x89, 0x79, 0x18, /* mov %rdi, 0x18(%rcx) */
-        0x48, 0x89, 0x69, 0x20, /* mov %rbp, 0x20(%rcx) */
-        0x48, 0x89, 0x61, 0x28, /* mov %rsp, 0x28(%rcx) */
-        0x48, 0x83, 0xc1, 0x30, /* add $0x30, %rcx */
-
-        /* offset: 0x25 */
         0xcc,  /* int3 */
-
-        0x0f, 0x0b, /* ud2, illegal instruction */
-
-        /* offset: 0x28 */
-        0x48, 0xb9, /* mov imm64, %rcx */
-        /* offset: 0x2a */
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-
-        0x48, 0x89, 0x01,       /* mov %rax, (%rcx) */
-        0x48, 0x89, 0x51, 0x08, /* mov %rdx, 0x8(%rcx) */
-        0x48, 0x89, 0x71, 0x10, /* mov %rsi, 0x10(%rcx) */
-        0x48, 0x89, 0x79, 0x18, /* mov %rdi, 0x18(%rcx) */
-        0x48, 0x89, 0x69, 0x20, /* mov %rbp, 0x20(%rcx) */
-        0x48, 0x89, 0x61, 0x28, /* mov %rsp, 0x28(%rcx) */
         0xc3,  /* ret  */
     };
     static BYTE hook_trampoline[] =
@@ -3709,12 +2716,8 @@ static void test_kiuserexceptiondispatcher(void)
         /* offset: 27 bytes */
         0x00, 0x00, 0x00, 0x00,     /* jmpq *addr */ /* jump to original function. */
     };
-
     void *phook_KiUserExceptionDispatcher = hook_KiUserExceptionDispatcher;
-    BYTE patched_KiUserExceptionDispatcher_bytes[12];
     DWORD old_protect1, old_protect2;
-    EXCEPTION_RECORD record;
-    void *bpt_address;
     BYTE *ptr;
     BOOL ret;
 
@@ -3724,9 +2727,6 @@ static void test_kiuserexceptiondispatcher(void)
         win_skip("KiUserExceptionDispatcher is not available.\n");
         return;
     }
-
-    *(ULONG64 *)(except_code + 2) = (ULONG64)&test_kiuserexceptiondispatcher_regs;
-    *(ULONG64 *)(except_code + 0x2a) = (ULONG64)&test_kiuserexceptiondispatcher_regs.new_rax;
 
     ok(((ULONG64)&phook_KiUserExceptionDispatcher & 0xffffffff) == ((ULONG64)&phook_KiUserExceptionDispatcher),
             "Address is too long.\n");
@@ -3739,13 +2739,11 @@ static void test_kiuserexceptiondispatcher(void)
     ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), PAGE_EXECUTE_READWRITE, &old_protect1);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
 
-    ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            PAGE_EXECUTE_READWRITE, &old_protect2);
+    ret = VirtualProtect(pKiUserExceptionDispatcher, 5, PAGE_EXECUTE_READWRITE, &old_protect2);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
 
-    memcpy(saved_KiUserExceptionDispatcher_bytes, pKiUserExceptionDispatcher,
-            sizeof(saved_KiUserExceptionDispatcher_bytes));
-    ptr = (BYTE *)patched_KiUserExceptionDispatcher_bytes;
+    memcpy(saved_KiUserExceptionDispatcher_bytes, pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes));
+    ptr = (BYTE *)pKiUserExceptionDispatcher;
     /* mov hook_trampoline, %rax */
     *ptr++ = 0x48;
     *ptr++ = 0xb8;
@@ -3755,851 +2753,26 @@ static void test_kiuserexceptiondispatcher(void)
     *ptr++ = 0xff;
     *ptr++ = 0xe0;
 
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
     got_exception = 0;
     run_exception_test(dbg_except_continue_handler, NULL, except_code, ARRAY_SIZE(except_code), PAGE_EXECUTE_READ);
     ok(got_exception, "Handler was not called.\n");
     ok(hook_called, "Hook was not called.\n");
 
-    ok(test_kiuserexceptiondispatcher_regs.new_rax == 0xdeadbeef, "Got unexpected rax %#lx.\n",
-            test_kiuserexceptiondispatcher_regs.new_rax);
-    ok(test_kiuserexceptiondispatcher_regs.old_rsi
-            == test_kiuserexceptiondispatcher_regs.new_rsi, "rsi does not match.\n");
-    ok(test_kiuserexceptiondispatcher_regs.old_rdi
-            == test_kiuserexceptiondispatcher_regs.new_rdi, "rdi does not match.\n");
-    ok(test_kiuserexceptiondispatcher_regs.old_rbp
-            == test_kiuserexceptiondispatcher_regs.new_rbp, "rbp does not match.\n");
-
-    bpt_address = (BYTE *)code_mem + 0x25;
-
-    ok(hook_exception_address == bpt_address || broken(!hook_exception_address) /* Win2008 */,
+    ok(hook_exception_address == code_mem || broken(!hook_exception_address) /* Win2008 */,
             "Got unexpected exception address %p, expected %p.\n",
-            hook_exception_address, bpt_address);
-    ok(hook_KiUserExceptionDispatcher_rip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            hook_KiUserExceptionDispatcher_rip, bpt_address);
-    ok(dbg_except_continue_handler_rip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            dbg_except_continue_handler_rip, bpt_address);
+            hook_exception_address, code_mem);
+    todo_wine ok(hook_KiUserExceptionDispatcher_rip == code_mem, "Got unexpected exception address %p, expected %p.\n",
+            hook_KiUserExceptionDispatcher_rip, code_mem);
+    ok(dbg_except_continue_handler_rip == code_mem, "Got unexpected exception address %p, expected %p.\n",
+            dbg_except_continue_handler_rip, code_mem);
 
-    memset(&record, 0, sizeof(record));
-    record.ExceptionCode = 0x80000003;
-    record.ExceptionFlags = 0;
-    record.ExceptionRecord = NULL;
-    record.ExceptionAddress = NULL;
-    record.NumberParameters = 0;
-
-    vectored_handler = AddVectoredExceptionHandler(TRUE, dbg_except_continue_vectored_handler);
-
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
-    got_exception = 0;
-    hook_called = FALSE;
-
-    pRtlRaiseException(&record);
-
-    ok(got_exception, "Handler was not called.\n");
-    ok(!hook_called, "Hook was called.\n");
-
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
-    got_exception = 0;
-    hook_called = FALSE;
-    NtCurrentTeb()->Peb->BeingDebugged = 1;
-
-    pRtlRaiseException(&record);
-
-    ok(got_exception, "Handler was not called.\n");
-    ok(hook_called, "Hook was not called.\n");
-
-    ok(hook_exception_address == (BYTE *)hook_KiUserExceptionDispatcher_rip + 1
-            || broken(!hook_exception_address) /* 2008 */, "Got unexpected addresses %p, %p.\n",
-            hook_KiUserExceptionDispatcher_rip, hook_exception_address);
-
-    RemoveVectoredExceptionHandler(vectored_handler);
-
-    memcpy(pKiUserExceptionDispatcher, patched_KiUserExceptionDispatcher_bytes,
-            sizeof(patched_KiUserExceptionDispatcher_bytes));
-    got_exception = 0;
-    hook_called = FALSE;
-
-    run_exception_test(dbg_except_continue_handler, NULL, except_code, ARRAY_SIZE(except_code), PAGE_EXECUTE_READ);
-
-    ok(got_exception, "Handler was not called.\n");
-    ok(hook_called, "Hook was not called.\n");
-    ok(hook_KiUserExceptionDispatcher_rip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            hook_KiUserExceptionDispatcher_rip, bpt_address);
-    ok(dbg_except_continue_handler_rip == bpt_address, "Got unexpected exception address %p, expected %p.\n",
-            dbg_except_continue_handler_rip, bpt_address);
-
-    ok(test_kiuserexceptiondispatcher_regs.new_rax == 0xdeadbeef, "Got unexpected rax %#lx.\n",
-            test_kiuserexceptiondispatcher_regs.new_rax);
-    ok(test_kiuserexceptiondispatcher_regs.old_rsi
-            == test_kiuserexceptiondispatcher_regs.new_rsi, "rsi does not match.\n");
-    ok(test_kiuserexceptiondispatcher_regs.old_rdi
-            == test_kiuserexceptiondispatcher_regs.new_rdi, "rdi does not match.\n");
-    ok(test_kiuserexceptiondispatcher_regs.old_rbp
-            == test_kiuserexceptiondispatcher_regs.new_rbp, "rbp does not match.\n");
-
-    NtCurrentTeb()->Peb->BeingDebugged = 0;
-
-    ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            old_protect2, &old_protect2);
+    ret = VirtualProtect(pKiUserExceptionDispatcher, 5, old_protect2, &old_protect2);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
     ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), old_protect1, &old_protect1);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
 }
 
-static BOOL got_nested_exception, got_prev_frame_exception;
-static void *nested_exception_initial_frame;
-
-static DWORD nested_exception_handler(EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_RECORD *frame,
-        CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher)
-{
-    trace("nested_exception_handler Rip %p, Rsp %p, code %#x, flags %#x, ExceptionAddress %p.\n",
-            (void *)context->Rip, (void *)context->Rsp, rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress);
-
-    if (rec->ExceptionCode == 0x80000003
-            && !(rec->ExceptionFlags & EH_NESTED_CALL))
-    {
-        ok(rec->NumberParameters == 1, "Got unexpected rec->NumberParameters %u.\n", rec->NumberParameters);
-        ok((void *)context->Rsp == frame, "Got unexpected frame %p.\n", frame);
-        ok(*(void **)frame == (char *)code_mem + 5, "Got unexpected *frame %p.\n", *(void **)frame);
-        ok(context->Rip == (ULONG_PTR)((char *)code_mem + 7), "Got unexpected Rip %#lx.\n", context->Rip);
-
-        nested_exception_initial_frame = frame;
-        RaiseException(0xdeadbeef, 0, 0, 0);
-        ++context->Rip;
-        return ExceptionContinueExecution;
-    }
-
-    if (rec->ExceptionCode == 0xdeadbeef && rec->ExceptionFlags == EH_NESTED_CALL)
-    {
-        ok(!rec->NumberParameters, "Got unexpected rec->NumberParameters %u.\n", rec->NumberParameters);
-        got_nested_exception = TRUE;
-        ok(frame == nested_exception_initial_frame, "Got unexpected frame %p.\n", frame);
-        return ExceptionContinueSearch;
-    }
-
-    ok(rec->ExceptionCode == 0xdeadbeef && !rec->ExceptionFlags,
-            "Got unexpected exception code %#x, flags %#x.\n", rec->ExceptionCode, rec->ExceptionFlags);
-    ok(!rec->NumberParameters, "Got unexpected rec->NumberParameters %u.\n", rec->NumberParameters);
-    ok(frame == (void *)((BYTE *)nested_exception_initial_frame + 8),
-            "Got unexpected frame %p.\n", frame);
-    got_prev_frame_exception = TRUE;
-    return ExceptionContinueExecution;
-}
-
-static void test_nested_exception(void)
-{
-    static const BYTE except_code[] =
-    {
-        0xe8, 0x02, 0x00, 0x00, 0x00, /* call nest */
-        0x90,                         /* nop */
-        0xc3,                         /* ret */
-        /* nest: */
-        0xcc,                         /* int3 */
-        0x90,                         /* nop */
-        0xc3,                         /* ret  */
-    };
-
-    got_nested_exception = got_prev_frame_exception = FALSE;
-    run_exception_test(nested_exception_handler, NULL, except_code, ARRAY_SIZE(except_code), PAGE_EXECUTE_READ);
-    ok(got_nested_exception, "Did not get nested exception.\n");
-    ok(got_prev_frame_exception, "Did not get nested exception in the previous frame.\n");
-}
-
-#elif defined(__arm__)
-
-static void test_thread_context(void)
-{
-    CONTEXT context;
-    NTSTATUS status;
-    struct expected
-    {
-        DWORD R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, Sp, Lr, Pc, Cpsr;
-    } expect;
-    NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = (void *)code_mem;
-
-    static const DWORD call_func[] =
-    {
-        0xe92d4002,  /* push    {r1, lr} */
-        0xe8821fff,  /* stm     r2, {r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, sl, fp, ip} */
-        0xe582d034,  /* str     sp, [r2, #52] */
-        0xe582e038,  /* str     lr, [r2, #56] */
-        0xe10f1000,  /* mrs     r1, CPSR */
-        0xe5821040,  /* str     r1, [r2, #64] */
-        0xe59d1000,  /* ldr     r1, [sp] */
-        0xe582f03c,  /* str     pc, [r2, #60] */
-        0xe12fff33,  /* blx     r3 */
-        0xe8bd8002,  /* pop     {r1, pc} */
-    };
-
-    memcpy( func_ptr, call_func, sizeof(call_func) );
-
-#define COMPARE(reg) \
-    ok( context.reg == expect.reg, "wrong " #reg " %08x/%08x\n", context.reg, expect.reg )
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    func_ptr( &context, 0, &expect, pRtlCaptureContext );
-    trace( "expect: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x "
-           "r10=%08x r11=%08x r12=%08x sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
-           expect.R0, expect.R1, expect.R2, expect.R3, expect.R4, expect.R5, expect.R6, expect.R7,
-           expect.R8, expect.R9, expect.R10, expect.R11, expect.R12, expect.Sp, expect.Lr, expect.Pc, expect.Cpsr );
-    trace( "actual: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x "
-           "r10=%08x r11=%08x r12=%08x sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
-           context.R0, context.R1, context.R2, context.R3, context.R4, context.R5, context.R6, context.R7,
-           context.R8, context.R9, context.R10, context.R11, context.R12, context.Sp, context.Lr, context.Pc, context.Cpsr );
-
-    ok( context.ContextFlags == CONTEXT_FULL,
-        "wrong flags %08x\n", context.ContextFlags );
-    COMPARE( R0 );
-    COMPARE( R1 );
-    COMPARE( R2 );
-    COMPARE( R3 );
-    COMPARE( R4 );
-    COMPARE( R5 );
-    COMPARE( R6 );
-    COMPARE( R7 );
-    COMPARE( R8 );
-    COMPARE( R9 );
-    COMPARE( R10 );
-    COMPARE( R11 );
-    COMPARE( R12 );
-    COMPARE( Sp );
-    COMPARE( Pc );
-    COMPARE( Cpsr );
-    ok( context.Lr == expect.Pc, "wrong Lr %08x/%08x\n", context.Lr, expect.Pc );
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    context.ContextFlags = CONTEXT_FULL;
-
-    status = func_ptr( GetCurrentThread(), &context, &expect, pNtGetContextThread );
-    ok( status == STATUS_SUCCESS, "NtGetContextThread failed %08x\n", status );
-    trace( "expect: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x "
-           "r10=%08x r11=%08x r12=%08x sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
-           expect.R0, expect.R1, expect.R2, expect.R3, expect.R4, expect.R5, expect.R6, expect.R7,
-           expect.R8, expect.R9, expect.R10, expect.R11, expect.R12, expect.Sp, expect.Lr, expect.Pc, expect.Cpsr );
-    trace( "actual: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x "
-           "r10=%08x r11=%08x r12=%08x sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
-           context.R0, context.R1, context.R2, context.R3, context.R4, context.R5, context.R6, context.R7,
-           context.R8, context.R9, context.R10, context.R11, context.R12, context.Sp, context.Lr, context.Pc, context.Cpsr );
-    /* other registers are not preserved */
-    COMPARE( R4 );
-    COMPARE( R5 );
-    COMPARE( R6 );
-    COMPARE( R7 );
-    COMPARE( R8 );
-    COMPARE( R9 );
-    COMPARE( R10 );
-    COMPARE( R11 );
-    COMPARE( Cpsr );
-    ok( context.Sp == expect.Sp - 8,
-        "wrong Sp %08x/%08x\n", context.Sp, expect.Sp - 8 );
-    /* Pc is somewhere close to the NtGetContextThread implementation */
-    ok( (char *)context.Pc >= (char *)pNtGetContextThread - 0x40000 &&
-        (char *)context.Pc <= (char *)pNtGetContextThread + 0x40000,
-        "wrong Pc %08x/%08x\n", context.Pc, (DWORD)pNtGetContextThread );
-#undef COMPARE
-}
-
-static void test_debugger(void)
-{
-    char cmdline[MAX_PATH];
-    PROCESS_INFORMATION pi;
-    STARTUPINFOA si = { 0 };
-    DEBUG_EVENT de;
-    DWORD continuestatus;
-    PVOID code_mem_address = NULL;
-    NTSTATUS status;
-    SIZE_T size_read;
-    BOOL ret;
-    int counter = 0;
-    si.cb = sizeof(si);
-
-    if(!pNtGetContextThread || !pNtSetContextThread || !pNtReadVirtualMemory || !pNtTerminateProcess)
-    {
-        skip("NtGetContextThread, NtSetContextThread, NtReadVirtualMemory or NtTerminateProcess not found\n");
-        return;
-    }
-
-    sprintf(cmdline, "%s %s %s %p", my_argv[0], my_argv[1], "debuggee", &test_stage);
-    ret = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, DEBUG_PROCESS, NULL, NULL, &si, &pi);
-    ok(ret, "could not create child process error: %u\n", GetLastError());
-    if (!ret)
-        return;
-
-    do
-    {
-        continuestatus = DBG_CONTINUE;
-        ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
-
-        ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
-        ok(!ret, "ContinueDebugEvent unexpectedly succeeded\n");
-        ok(GetLastError() == ERROR_INVALID_PARAMETER, "Unexpected last error: %u\n", GetLastError());
-
-        if (de.dwThreadId != pi.dwThreadId)
-        {
-            trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
-            continue;
-        }
-
-        if (de.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT)
-        {
-            if(de.u.CreateProcessInfo.lpBaseOfImage != NtCurrentTeb()->Peb->ImageBaseAddress)
-            {
-                skip("child process loaded at different address, terminating it\n");
-                pNtTerminateProcess(pi.hProcess, 0);
-            }
-        }
-        else if (de.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
-        {
-            CONTEXT ctx;
-            int stage;
-
-            counter++;
-            status = pNtReadVirtualMemory(pi.hProcess, &code_mem, &code_mem_address,
-                                          sizeof(code_mem_address), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ctx.ContextFlags = CONTEXT_FULL;
-            status = pNtGetContextThread(pi.hThread, &ctx);
-            ok(!status, "NtGetContextThread failed with 0x%x\n", status);
-
-            trace("exception 0x%x at %p firstchance=%d pc=%08x, r0=%08x\n",
-                  de.u.Exception.ExceptionRecord.ExceptionCode,
-                  de.u.Exception.ExceptionRecord.ExceptionAddress,
-                  de.u.Exception.dwFirstChance, ctx.Pc, ctx.R0);
-
-            if (counter > 100)
-            {
-                ok(FALSE, "got way too many exceptions, probably caught in an infinite loop, terminating child\n");
-                pNtTerminateProcess(pi.hProcess, 1);
-            }
-            else if (counter >= 2) /* skip startup breakpoint */
-            {
-#if 0  /* RtlRaiseException test disabled for now */
-                if (stage == 1)
-                {
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at %x instead of %p\n",
-                       ctx.Pc, (char *)code_mem_address + 0xb);
-                    /* setting the context from debugger does not affect the context that the
-                     * exception handler gets, except on w2008 */
-                    ctx.Pc = (UINT_PTR)code_mem_address + 0xd;
-                    ctx.R0 = 0xf00f00f1;
-                    /* let the debuggee handle the exception */
-                    continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 2)
-                {
-                    if (de.u.Exception.dwFirstChance)
-                    {
-                        /* debugger gets first chance exception with unmodified ctx.Pc */
-                        ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at 0x%x instead of %p\n",
-                           ctx.Pc, (char *)code_mem_address + 0xb);
-                        ctx.Pc = (UINT_PTR)code_mem_address + 0xd;
-                        ctx.R0 = 0xf00f00f1;
-                        /* pass exception to debuggee
-                         * exception will not be handled and a second chance exception will be raised */
-                        continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                    }
-                    else
-                    {
-                        /* debugger gets context after exception handler has played with it */
-                        /* ctx.Pc is the same value the exception handler got */
-                        if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
-                        {
-                            ok((char *)ctx.Pc == (char *)code_mem_address + 0xa,
-                               "Pc at 0x%x instead of %p\n", ctx.Pc, (char *)code_mem_address + 0xa);
-                            /* need to fixup Pc for debuggee */
-                            /*ctx.Pc += 2; */
-                        }
-                        else ok((char *)ctx.Pc == (char *)code_mem_address + 0xb,
-                                "Pc at 0x%x instead of %p\n", ctx.Pc, (char *)code_mem_address + 0xb);
-                        /* here we handle exception */
-                    }
-                }
-                else
-#endif
-                if (stage == 7 || stage == 8)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 0x1d,
-                       "expected Pc = %p, got 0x%x\n", (char *)code_mem_address + 0x1d, ctx.Pc);
-                    if (stage == 8) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 9 || stage == 10)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 4,
-                       "expected Pc = %p, got 0x%x\n", (char *)code_mem_address + 4, ctx.Pc);
-                    if (stage == 10) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 11 || stage == 12 || stage == 13)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_INVALID_HANDLE,
-                       "unexpected exception code %08x, expected %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode,
-                       EXCEPTION_INVALID_HANDLE);
-                    ok(de.u.Exception.ExceptionRecord.NumberParameters == 0,
-                       "unexpected number of parameters %d, expected 0\n", de.u.Exception.ExceptionRecord.NumberParameters);
-
-                    if (stage == 12|| stage == 13) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else
-                    ok(FALSE, "unexpected stage %x\n", stage);
-
-                status = pNtSetContextThread(pi.hThread, &ctx);
-                ok(!status, "NtSetContextThread failed with 0x%x\n", status);
-            }
-        }
-        else if (de.dwDebugEventCode == OUTPUT_DEBUG_STRING_EVENT)
-        {
-            int stage;
-            char buffer[64];
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ok(!de.u.DebugString.fUnicode, "unexpected unicode debug string event\n");
-            ok(de.u.DebugString.nDebugStringLength < sizeof(buffer) - 1, "buffer not large enough to hold %d bytes\n",
-               de.u.DebugString.nDebugStringLength);
-
-            memset(buffer, 0, sizeof(buffer));
-            status = pNtReadVirtualMemory(pi.hProcess, de.u.DebugString.lpDebugStringData, buffer,
-                                          de.u.DebugString.nDebugStringLength, &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 3 || stage == 4)
-                ok(!strcmp(buffer, "Hello World"), "got unexpected debug string '%s'\n", buffer);
-            else /* ignore unrelated debug strings like 'SHIMVIEW: ShimInfo(Complete)' */
-                ok(strstr(buffer, "SHIMVIEW") != NULL, "unexpected stage %x, got debug string event '%s'\n", stage, buffer);
-
-            if (stage == 4) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-        else if (de.dwDebugEventCode == RIP_EVENT)
-        {
-            int stage;
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 5 || stage == 6)
-            {
-                ok(de.u.RipInfo.dwError == 0x11223344, "got unexpected rip error code %08x, expected %08x\n",
-                   de.u.RipInfo.dwError, 0x11223344);
-                ok(de.u.RipInfo.dwType  == 0x55667788, "got unexpected rip type %08x, expected %08x\n",
-                   de.u.RipInfo.dwType, 0x55667788);
-            }
-            else
-                ok(FALSE, "unexpected stage %x\n", stage);
-
-            if (stage == 6) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-
-        ContinueDebugEvent(de.dwProcessId, de.dwThreadId, continuestatus);
-
-    } while (de.dwDebugEventCode != EXIT_PROCESS_DEBUG_EVENT);
-
-    wait_child_process( pi.hProcess );
-    ret = CloseHandle(pi.hThread);
-    ok(ret, "error %u\n", GetLastError());
-    ret = CloseHandle(pi.hProcess);
-    ok(ret, "error %u\n", GetLastError());
-}
-
-static void test_debug_service(DWORD numexc)
-{
-    /* not supported */
-}
-
-#elif defined(__aarch64__)
-
-static void test_thread_context(void)
-{
-    CONTEXT context;
-    NTSTATUS status;
-    struct expected
-    {
-        ULONG64 X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16,
-            X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, Fp, Lr, Sp, Pc;
-        ULONG Cpsr;
-    } expect;
-    NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = (void *)code_mem;
-
-    static const DWORD call_func[] =
-    {
-        0xa9bf7bfd,  /* stp     x29, x30, [sp, #-16]! */
-        0xa9000440,  /* stp     x0, x1, [x2] */
-        0xa9010c42,  /* stp     x2, x3, [x2, #16] */
-        0xa9021444,  /* stp     x4, x5, [x2, #32] */
-        0xa9031c46,  /* stp     x6, x7, [x2, #48] */
-        0xa9042448,  /* stp     x8, x9, [x2, #64] */
-        0xa9052c4a,  /* stp     x10, x11, [x2, #80] */
-        0xa906344c,  /* stp     x12, x13, [x2, #96] */
-        0xa9073c4e,  /* stp     x14, x15, [x2, #112] */
-        0xa9084450,  /* stp     x16, x17, [x2, #128] */
-        0xa9094c52,  /* stp     x18, x19, [x2, #144] */
-        0xa90a5454,  /* stp     x20, x21, [x2, #160] */
-        0xa90b5c56,  /* stp     x22, x23, [x2, #176] */
-        0xa90c6458,  /* stp     x24, x25, [x2, #192] */
-        0xa90d6c5a,  /* stp     x26, x27, [x2, #208] */
-        0xa90e745c,  /* stp     x28, x29, [x2, #224] */
-        0xf900785e,  /* str     x30, [x2, #240] */
-        0x910003e1,  /* mov     x1, sp */
-        0xf9007c41,  /* str     x1, [x2, #248] */
-        0x90000001,  /* adrp    x1, 1f */
-        0x9101a021,  /* add     x1, x1, #:lo12:1f */
-        0xf9008041,  /* str     x1, [x2, #256] */
-        0xd53b4201,  /* mrs     x1, nzcv */
-        0xb9010841,  /* str     w1, [x2, #264] */
-        0xf9400441,  /* ldr     x1, [x2, #8] */
-        0xd63f0060,  /* blr     x3 */
-        0xa8c17bfd,  /* 1: ldp     x29, x30, [sp], #16 */
-        0xd65f03c0,  /* ret */
-     };
-
-    memcpy( func_ptr, call_func, sizeof(call_func) );
-
-#define COMPARE(reg) \
-    ok( context.reg == expect.reg, "wrong " #reg " %p/%p\n", (void *)(ULONG64)context.reg, (void *)(ULONG64)expect.reg )
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    func_ptr( &context, 0, &expect, pRtlCaptureContext );
-    trace( "expect: x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p fp=%p lr=%p sp=%p pc=%p cpsr=%08x\n",
-           (void *)expect.X0, (void *)expect.X1, (void *)expect.X2, (void *)expect.X3,
-           (void *)expect.X4, (void *)expect.X5, (void *)expect.X6, (void *)expect.X7,
-           (void *)expect.X8, (void *)expect.X9, (void *)expect.X10, (void *)expect.X11,
-           (void *)expect.X12, (void *)expect.X13, (void *)expect.X14, (void *)expect.X15,
-           (void *)expect.X16, (void *)expect.X17, (void *)expect.X18, (void *)expect.X19,
-           (void *)expect.X20, (void *)expect.X21, (void *)expect.X22, (void *)expect.X23,
-           (void *)expect.X24, (void *)expect.X25, (void *)expect.X26, (void *)expect.X27,
-           (void *)expect.X28, (void *)expect.Fp, (void *)expect.Lr, (void *)expect.Sp,
-           (void *)expect.Pc, expect.Cpsr );
-    trace( "actual: x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p fp=%p lr=%p sp=%p pc=%p cpsr=%08x\n",
-           (void *)context.X0, (void *)context.X1, (void *)context.X2, (void *)context.X3,
-           (void *)context.X4, (void *)context.X5, (void *)context.X6, (void *)context.X7,
-           (void *)context.X8, (void *)context.X9, (void *)context.X10, (void *)context.X11,
-           (void *)context.X12, (void *)context.X13, (void *)context.X14, (void *)context.X15,
-           (void *)context.X16, (void *)context.X17, (void *)context.X18, (void *)context.X19,
-           (void *)context.X20, (void *)context.X21, (void *)context.X22, (void *)context.X23,
-           (void *)context.X24, (void *)context.X25, (void *)context.X26, (void *)context.X27,
-           (void *)context.X28, (void *)context.Fp, (void *)context.Lr, (void *)context.Sp,
-           (void *)context.Pc, context.Cpsr );
-
-    ok( context.ContextFlags == CONTEXT_FULL,
-        "wrong flags %08x\n", context.ContextFlags );
-    COMPARE( X0 );
-    COMPARE( X1 );
-    COMPARE( X2 );
-    COMPARE( X3 );
-    COMPARE( X4 );
-    COMPARE( X5 );
-    COMPARE( X6 );
-    COMPARE( X7 );
-    COMPARE( X8 );
-    COMPARE( X9 );
-    COMPARE( X10 );
-    COMPARE( X11 );
-    COMPARE( X12 );
-    COMPARE( X13 );
-    COMPARE( X14 );
-    COMPARE( X15 );
-    COMPARE( X16 );
-    COMPARE( X17 );
-    COMPARE( X18 );
-    COMPARE( X19 );
-    COMPARE( X20 );
-    COMPARE( X21 );
-    COMPARE( X22 );
-    COMPARE( X23 );
-    COMPARE( X24 );
-    COMPARE( X25 );
-    COMPARE( X26 );
-    COMPARE( X27 );
-    COMPARE( X28 );
-    COMPARE( Fp );
-    COMPARE( Sp );
-    COMPARE( Pc );
-    COMPARE( Cpsr );
-    ok( context.Lr == expect.Pc, "wrong Lr %p/%p\n", (void *)context.Lr, (void *)expect.Pc );
-
-    memset( &context, 0xcc, sizeof(context) );
-    memset( &expect, 0xcc, sizeof(expect) );
-    context.ContextFlags = CONTEXT_FULL;
-
-    status = func_ptr( GetCurrentThread(), &context, &expect, pNtGetContextThread );
-    ok( status == STATUS_SUCCESS, "NtGetContextThread failed %08x\n", status );
-    trace( "expect: x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p fp=%p lr=%p sp=%p pc=%p cpsr=%08x\n",
-           (void *)expect.X0, (void *)expect.X1, (void *)expect.X2, (void *)expect.X3,
-           (void *)expect.X4, (void *)expect.X5, (void *)expect.X6, (void *)expect.X7,
-           (void *)expect.X8, (void *)expect.X9, (void *)expect.X10, (void *)expect.X11,
-           (void *)expect.X12, (void *)expect.X13, (void *)expect.X14, (void *)expect.X15,
-           (void *)expect.X16, (void *)expect.X17, (void *)expect.X18, (void *)expect.X19,
-           (void *)expect.X20, (void *)expect.X21, (void *)expect.X22, (void *)expect.X23,
-           (void *)expect.X24, (void *)expect.X25, (void *)expect.X26, (void *)expect.X27,
-           (void *)expect.X28, (void *)expect.Fp, (void *)expect.Lr, (void *)expect.Sp,
-           (void *)expect.Pc, expect.Cpsr );
-    trace( "actual: x0=%p x1=%p x2=%p x3=%p x4=%p x5=%p x6=%p x7=%p x8=%p x9=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p x18=%p x19=%p x20=%p x21=%p x22=%p x23=%p x24=%p x25=%p x26=%p x27=%p x28=%p fp=%p lr=%p sp=%p pc=%p cpsr=%08x\n",
-           (void *)context.X0, (void *)context.X1, (void *)context.X2, (void *)context.X3,
-           (void *)context.X4, (void *)context.X5, (void *)context.X6, (void *)context.X7,
-           (void *)context.X8, (void *)context.X9, (void *)context.X10, (void *)context.X11,
-           (void *)context.X12, (void *)context.X13, (void *)context.X14, (void *)context.X15,
-           (void *)context.X16, (void *)context.X17, (void *)context.X18, (void *)context.X19,
-           (void *)context.X20, (void *)context.X21, (void *)context.X22, (void *)context.X23,
-           (void *)context.X24, (void *)context.X25, (void *)context.X26, (void *)context.X27,
-           (void *)context.X28, (void *)context.Fp, (void *)context.Lr, (void *)context.Sp,
-           (void *)context.Pc, context.Cpsr );
-    /* other registers are not preserved */
-    todo_wine COMPARE( X18 );
-    COMPARE( X19 );
-    COMPARE( X20 );
-    COMPARE( X21 );
-    COMPARE( X22 );
-    COMPARE( X23 );
-    COMPARE( X24 );
-    COMPARE( X25 );
-    COMPARE( X26 );
-    COMPARE( X27 );
-    COMPARE( X28 );
-    COMPARE( Fp );
-    ok( context.Lr == expect.Pc, "wrong Lr %p/%p\n", (void *)context.Lr, (void *)expect.Pc );
-    ok( context.Sp == expect.Sp - 16,
-        "wrong Sp %p/%p\n", (void *)context.Sp, (void *)(expect.Sp - 16) );
-    /* Pc is somewhere close to the NtGetContextThread implementation */
-    ok( (char *)context.Pc >= (char *)pNtGetContextThread - 0x40000 &&
-        (char *)context.Pc <= (char *)pNtGetContextThread + 0x40000,
-        "wrong Pc %08x/%08x\n", context.Pc, (DWORD)pNtGetContextThread );
-#undef COMPARE
-}
-
-static void test_debugger(void)
-{
-    char cmdline[MAX_PATH];
-    PROCESS_INFORMATION pi;
-    STARTUPINFOA si = { 0 };
-    DEBUG_EVENT de;
-    DWORD continuestatus;
-    PVOID code_mem_address = NULL;
-    NTSTATUS status;
-    SIZE_T size_read;
-    BOOL ret;
-    int counter = 0;
-    si.cb = sizeof(si);
-
-    if(!pNtGetContextThread || !pNtSetContextThread || !pNtReadVirtualMemory || !pNtTerminateProcess)
-    {
-        skip("NtGetContextThread, NtSetContextThread, NtReadVirtualMemory or NtTerminateProcess not found\n");
-        return;
-    }
-
-    sprintf(cmdline, "%s %s %s %p", my_argv[0], my_argv[1], "debuggee", &test_stage);
-    ret = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, DEBUG_PROCESS, NULL, NULL, &si, &pi);
-    ok(ret, "could not create child process error: %u\n", GetLastError());
-    if (!ret)
-        return;
-
-    do
-    {
-        continuestatus = DBG_CONTINUE;
-        ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
-
-        ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
-        ok(!ret, "ContinueDebugEvent unexpectedly succeeded\n");
-        ok(GetLastError() == ERROR_INVALID_PARAMETER, "Unexpected last error: %u\n", GetLastError());
-
-        if (de.dwThreadId != pi.dwThreadId)
-        {
-            trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
-            continue;
-        }
-
-        if (de.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT)
-        {
-            if(de.u.CreateProcessInfo.lpBaseOfImage != NtCurrentTeb()->Peb->ImageBaseAddress)
-            {
-                skip("child process loaded at different address, terminating it\n");
-                pNtTerminateProcess(pi.hProcess, 0);
-            }
-        }
-        else if (de.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
-        {
-            CONTEXT ctx;
-            int stage;
-
-            counter++;
-            status = pNtReadVirtualMemory(pi.hProcess, &code_mem, &code_mem_address,
-                                          sizeof(code_mem_address), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ctx.ContextFlags = CONTEXT_FULL;
-            status = pNtGetContextThread(pi.hThread, &ctx);
-            ok(!status, "NtGetContextThread failed with 0x%x\n", status);
-
-            trace("exception 0x%x at %p firstchance=%d pc=%p, x0=%p\n",
-                  de.u.Exception.ExceptionRecord.ExceptionCode,
-                  de.u.Exception.ExceptionRecord.ExceptionAddress,
-                  de.u.Exception.dwFirstChance, (char *)ctx.Pc, (char *)ctx.X0);
-
-            if (counter > 100)
-            {
-                ok(FALSE, "got way too many exceptions, probably caught in an infinite loop, terminating child\n");
-                pNtTerminateProcess(pi.hProcess, 1);
-            }
-            else if (counter >= 2) /* skip startup breakpoint */
-            {
-#if 0  /* RtlRaiseException test disabled for now */
-                if (stage == 1)
-                {
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at %p instead of %p\n",
-                       (char *)ctx.Pc, (char *)code_mem_address + 0xb);
-                    /* setting the context from debugger does not affect the context that the
-                     * exception handler gets, except on w2008 */
-                    ctx.Pc = (UINT_PTR)code_mem_address + 0xd;
-                    ctx.X0 = 0xf00f00f1;
-                    /* let the debuggee handle the exception */
-                    continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 2)
-                {
-                    if (de.u.Exception.dwFirstChance)
-                    {
-                        /* debugger gets first chance exception with unmodified ctx.Pc */
-                        ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at %p instead of %p\n",
-                           (char *)ctx.Pc, (char *)code_mem_address + 0xb);
-                        ctx.Pc = (UINT_PTR)code_mem_address + 0xd;
-                        ctx.X0 = 0xf00f00f1;
-                        /* pass exception to debuggee
-                         * exception will not be handled and a second chance exception will be raised */
-                        continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                    }
-                    else
-                    {
-                        /* debugger gets context after exception handler has played with it */
-                        /* ctx.Pc is the same value the exception handler got */
-                        if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
-                        {
-                            ok((char *)ctx.Pc == (char *)code_mem_address + 0xa,
-                               "Pc at %p instead of %p\n", (char *)ctx.Pc, (char *)code_mem_address + 0xa);
-                            /* need to fixup Pc for debuggee */
-                            ctx.Pc += 4;
-                        }
-                        else ok((char *)ctx.Pc == (char *)code_mem_address + 0xb,
-                                "Pc at 0x%x instead of %p\n", ctx.Pc, (char *)code_mem_address + 0xb);
-                        /* here we handle exception */
-                    }
-                }
-                else
-#endif
-                if (stage == 7 || stage == 8)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 0x1d,
-                       "expected Pc = %p, got %p\n", (char *)code_mem_address + 0x1d, (char *)ctx.Pc);
-                    if (stage == 8) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 9 || stage == 10)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
-                       "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 4,
-                       "expected Pc = %p, got %p\n", (char *)code_mem_address + 4, (char *)ctx.Pc);
-                    if (stage == 10) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else if (stage == 11 || stage == 12 || stage == 13)
-                {
-                    ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_INVALID_HANDLE,
-                       "unexpected exception code %08x, expected %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode,
-                       EXCEPTION_INVALID_HANDLE);
-                    ok(de.u.Exception.ExceptionRecord.NumberParameters == 0,
-                       "unexpected number of parameters %d, expected 0\n", de.u.Exception.ExceptionRecord.NumberParameters);
-
-                    if (stage == 12|| stage == 13) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-                }
-                else
-                    ok(FALSE, "unexpected stage %x\n", stage);
-
-                status = pNtSetContextThread(pi.hThread, &ctx);
-                ok(!status, "NtSetContextThread failed with 0x%x\n", status);
-            }
-        }
-        else if (de.dwDebugEventCode == OUTPUT_DEBUG_STRING_EVENT)
-        {
-            int stage;
-            char buffer[64];
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            ok(!de.u.DebugString.fUnicode, "unexpected unicode debug string event\n");
-            ok(de.u.DebugString.nDebugStringLength < sizeof(buffer) - 1, "buffer not large enough to hold %d bytes\n",
-               de.u.DebugString.nDebugStringLength);
-
-            memset(buffer, 0, sizeof(buffer));
-            status = pNtReadVirtualMemory(pi.hProcess, de.u.DebugString.lpDebugStringData, buffer,
-                                          de.u.DebugString.nDebugStringLength, &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 3 || stage == 4)
-                ok(!strcmp(buffer, "Hello World"), "got unexpected debug string '%s'\n", buffer);
-            else /* ignore unrelated debug strings like 'SHIMVIEW: ShimInfo(Complete)' */
-                ok(strstr(buffer, "SHIMVIEW") != NULL, "unexpected stage %x, got debug string event '%s'\n", stage, buffer);
-
-            if (stage == 4) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-        else if (de.dwDebugEventCode == RIP_EVENT)
-        {
-            int stage;
-
-            status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
-                                          sizeof(stage), &size_read);
-            ok(!status,"NtReadVirtualMemory failed with 0x%x\n", status);
-
-            if (stage == 5 || stage == 6)
-            {
-                ok(de.u.RipInfo.dwError == 0x11223344, "got unexpected rip error code %08x, expected %08x\n",
-                   de.u.RipInfo.dwError, 0x11223344);
-                ok(de.u.RipInfo.dwType  == 0x55667788, "got unexpected rip type %08x, expected %08x\n",
-                   de.u.RipInfo.dwType, 0x55667788);
-            }
-            else
-                ok(FALSE, "unexpected stage %x\n", stage);
-
-            if (stage == 6) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
-        }
-
-        ContinueDebugEvent(de.dwProcessId, de.dwThreadId, continuestatus);
-
-    } while (de.dwDebugEventCode != EXIT_PROCESS_DEBUG_EVENT);
-
-    wait_child_process( pi.hProcess );
-    ret = CloseHandle(pi.hThread);
-    ok(ret, "error %u\n", GetLastError());
-    ret = CloseHandle(pi.hProcess);
-    ok(ret, "error %u\n", GetLastError());
-}
-
-static void test_debug_service(DWORD numexc)
-{
-    /* not supported */
-}
-
-#endif  /* __aarch64__ */
+#endif  /* __x86_64__ */
 
 #if defined(__i386__) || defined(__x86_64__)
 
@@ -4693,6 +2866,96 @@ static void test_debug_registers(void)
     ResumeThread(thread);
     WaitForSingleObject(thread, 10000);
     CloseHandle(thread);
+}
+
+static DWORD outputdebugstring_exceptions;
+
+static LONG CALLBACK outputdebugstring_vectored_handler(EXCEPTION_POINTERS *ExceptionInfo)
+{
+    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
+    trace("vect. handler %08x addr:%p\n", rec->ExceptionCode, rec->ExceptionAddress);
+
+    ok(rec->ExceptionCode == DBG_PRINTEXCEPTION_C, "ExceptionCode is %08x instead of %08x\n",
+        rec->ExceptionCode, DBG_PRINTEXCEPTION_C);
+    ok(rec->NumberParameters == 2, "ExceptionParameters is %d instead of 2\n", rec->NumberParameters);
+    ok(rec->ExceptionInformation[0] == 12, "ExceptionInformation[0] = %d instead of 12\n", (DWORD)rec->ExceptionInformation[0]);
+    ok(!strcmp((char *)rec->ExceptionInformation[1], "Hello World"),
+        "ExceptionInformation[1] = '%s' instead of 'Hello World'\n", (char *)rec->ExceptionInformation[1]);
+
+    outputdebugstring_exceptions++;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void test_outputdebugstring(DWORD numexc, BOOL todo)
+{
+    PVOID vectored_handler;
+
+    if (!pRtlAddVectoredExceptionHandler || !pRtlRemoveVectoredExceptionHandler)
+    {
+        skip("RtlAddVectoredExceptionHandler or RtlRemoveVectoredExceptionHandler not found\n");
+        return;
+    }
+
+    vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &outputdebugstring_vectored_handler);
+    ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
+
+    outputdebugstring_exceptions = 0;
+    OutputDebugStringA("Hello World");
+
+    todo_wine_if(todo)
+    ok(outputdebugstring_exceptions == numexc, "OutputDebugStringA generated %d exceptions, expected %d\n",
+       outputdebugstring_exceptions, numexc);
+
+    pRtlRemoveVectoredExceptionHandler(vectored_handler);
+}
+
+static DWORD ripevent_exceptions;
+
+static LONG CALLBACK ripevent_vectored_handler(EXCEPTION_POINTERS *ExceptionInfo)
+{
+    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
+    trace("vect. handler %08x addr:%p\n", rec->ExceptionCode, rec->ExceptionAddress);
+
+    ok(rec->ExceptionCode == DBG_RIPEXCEPTION, "ExceptionCode is %08x instead of %08x\n",
+       rec->ExceptionCode, DBG_RIPEXCEPTION);
+    ok(rec->NumberParameters == 2, "ExceptionParameters is %d instead of 2\n", rec->NumberParameters);
+    ok(rec->ExceptionInformation[0] == 0x11223344, "ExceptionInformation[0] = %08x instead of %08x\n",
+       (NTSTATUS)rec->ExceptionInformation[0], 0x11223344);
+    ok(rec->ExceptionInformation[1] == 0x55667788, "ExceptionInformation[1] = %08x instead of %08x\n",
+       (NTSTATUS)rec->ExceptionInformation[1], 0x55667788);
+
+    ripevent_exceptions++;
+    return (rec->ExceptionCode == DBG_RIPEXCEPTION) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void test_ripevent(DWORD numexc)
+{
+    EXCEPTION_RECORD record;
+    PVOID vectored_handler;
+
+    if (!pRtlAddVectoredExceptionHandler || !pRtlRemoveVectoredExceptionHandler || !pRtlRaiseException)
+    {
+        skip("RtlAddVectoredExceptionHandler or RtlRemoveVectoredExceptionHandler or RtlRaiseException not found\n");
+        return;
+    }
+
+    vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &ripevent_vectored_handler);
+    ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
+
+    record.ExceptionCode = DBG_RIPEXCEPTION;
+    record.ExceptionFlags = 0;
+    record.ExceptionRecord = NULL;
+    record.ExceptionAddress = NULL;
+    record.NumberParameters = 2;
+    record.ExceptionInformation[0] = 0x11223344;
+    record.ExceptionInformation[1] = 0x55667788;
+
+    ripevent_exceptions = 0;
+    pRtlRaiseException(&record);
+    ok(ripevent_exceptions == numexc, "RtlRaiseException generated %d exceptions, expected %d\n",
+       ripevent_exceptions, numexc);
+
+    pRtlRemoveVectoredExceptionHandler(vectored_handler);
 }
 
 static DWORD debug_service_exceptions;
@@ -4869,97 +3132,6 @@ static void test_debug_service(DWORD numexc)
 
     pRtlRemoveVectoredExceptionHandler(vectored_handler);
 }
-#endif /* defined(__i386__) || defined(__x86_64__) */
-
-static DWORD outputdebugstring_exceptions;
-
-static LONG CALLBACK outputdebugstring_vectored_handler(EXCEPTION_POINTERS *ExceptionInfo)
-{
-    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
-    trace("vect. handler %08x addr:%p\n", rec->ExceptionCode, rec->ExceptionAddress);
-
-    ok(rec->ExceptionCode == DBG_PRINTEXCEPTION_C, "ExceptionCode is %08x instead of %08x\n",
-        rec->ExceptionCode, DBG_PRINTEXCEPTION_C);
-    ok(rec->NumberParameters == 2, "ExceptionParameters is %d instead of 2\n", rec->NumberParameters);
-    ok(rec->ExceptionInformation[0] == 12, "ExceptionInformation[0] = %d instead of 12\n", (DWORD)rec->ExceptionInformation[0]);
-    ok(!strcmp((char *)rec->ExceptionInformation[1], "Hello World"),
-        "ExceptionInformation[1] = '%s' instead of 'Hello World'\n", (char *)rec->ExceptionInformation[1]);
-
-    outputdebugstring_exceptions++;
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void test_outputdebugstring(DWORD numexc, BOOL todo)
-{
-    PVOID vectored_handler;
-
-    if (!pRtlAddVectoredExceptionHandler || !pRtlRemoveVectoredExceptionHandler)
-    {
-        skip("RtlAddVectoredExceptionHandler or RtlRemoveVectoredExceptionHandler not found\n");
-        return;
-    }
-
-    vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &outputdebugstring_vectored_handler);
-    ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
-
-    outputdebugstring_exceptions = 0;
-    OutputDebugStringA("Hello World");
-
-    todo_wine_if(todo)
-    ok(outputdebugstring_exceptions == numexc, "OutputDebugStringA generated %d exceptions, expected %d\n",
-       outputdebugstring_exceptions, numexc);
-
-    pRtlRemoveVectoredExceptionHandler(vectored_handler);
-}
-
-static DWORD ripevent_exceptions;
-
-static LONG CALLBACK ripevent_vectored_handler(EXCEPTION_POINTERS *ExceptionInfo)
-{
-    PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
-    trace("vect. handler %08x addr:%p\n", rec->ExceptionCode, rec->ExceptionAddress);
-
-    ok(rec->ExceptionCode == DBG_RIPEXCEPTION, "ExceptionCode is %08x instead of %08x\n",
-       rec->ExceptionCode, DBG_RIPEXCEPTION);
-    ok(rec->NumberParameters == 2, "ExceptionParameters is %d instead of 2\n", rec->NumberParameters);
-    ok(rec->ExceptionInformation[0] == 0x11223344, "ExceptionInformation[0] = %08x instead of %08x\n",
-       (NTSTATUS)rec->ExceptionInformation[0], 0x11223344);
-    ok(rec->ExceptionInformation[1] == 0x55667788, "ExceptionInformation[1] = %08x instead of %08x\n",
-       (NTSTATUS)rec->ExceptionInformation[1], 0x55667788);
-
-    ripevent_exceptions++;
-    return (rec->ExceptionCode == DBG_RIPEXCEPTION) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void test_ripevent(DWORD numexc)
-{
-    EXCEPTION_RECORD record;
-    PVOID vectored_handler;
-
-    if (!pRtlAddVectoredExceptionHandler || !pRtlRemoveVectoredExceptionHandler || !pRtlRaiseException)
-    {
-        skip("RtlAddVectoredExceptionHandler or RtlRemoveVectoredExceptionHandler or RtlRaiseException not found\n");
-        return;
-    }
-
-    vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &ripevent_vectored_handler);
-    ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
-
-    record.ExceptionCode = DBG_RIPEXCEPTION;
-    record.ExceptionFlags = 0;
-    record.ExceptionRecord = NULL;
-    record.ExceptionAddress = NULL;
-    record.NumberParameters = 2;
-    record.ExceptionInformation[0] = 0x11223344;
-    record.ExceptionInformation[1] = 0x55667788;
-
-    ripevent_exceptions = 0;
-    pRtlRaiseException(&record);
-    ok(ripevent_exceptions == numexc, "RtlRaiseException generated %d exceptions, expected %d\n",
-       ripevent_exceptions, numexc);
-
-    pRtlRemoveVectoredExceptionHandler(vectored_handler);
-}
 
 static DWORD breakpoint_exceptions;
 
@@ -4979,7 +3151,7 @@ static LONG CALLBACK breakpoint_handler(EXCEPTION_POINTERS *ExceptionInfo)
     ok(rec->ExceptionInformation[0] == 0,
        "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
     ExceptionInfo->ContextRecord->Eip = (DWORD)code_mem + 2;
-#elif defined(__x86_64__)
+#else
     ok(ExceptionInfo->ContextRecord->Rip == (DWORD_PTR)code_mem + 1,
        "expected Rip = %lx, got %lx\n", (DWORD_PTR)code_mem + 1, ExceptionInfo->ContextRecord->Rip);
     ok(rec->NumberParameters == 1,
@@ -4987,33 +3159,16 @@ static LONG CALLBACK breakpoint_handler(EXCEPTION_POINTERS *ExceptionInfo)
     ok(rec->ExceptionInformation[0] == 0,
        "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
     ExceptionInfo->ContextRecord->Rip = (DWORD_PTR)code_mem + 2;
-#elif defined(__arm__)
-    ok(ExceptionInfo->ContextRecord->Pc == (DWORD)code_mem + 4,
-       "expected pc = %lx, got %lx\n", (DWORD)code_mem + 4, ExceptionInfo->ContextRecord->Pc);
-    ok(rec->NumberParameters == 1,
-       "ExceptionParameters is %d instead of 1\n", rec->NumberParameters);
-    ok(rec->ExceptionInformation[0] == 0,
-       "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
-#elif defined(__aarch64__)
-    ok(ExceptionInfo->ContextRecord->Pc == (DWORD_PTR)code_mem + 4,
-       "expected pc = %lx, got %lx\n", (DWORD_PTR)code_mem + 4, ExceptionInfo->ContextRecord->Pc);
-    ok(rec->NumberParameters == 1,
-       "ExceptionParameters is %d instead of 1\n", rec->NumberParameters);
-    ok(rec->ExceptionInformation[0] == 0,
-       "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
 #endif
 
     breakpoint_exceptions++;
     return (rec->ExceptionCode == EXCEPTION_BREAKPOINT) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
 
-#if defined(__i386__) || defined(__x86_64__)
-static const BYTE breakpoint_code[] = { 0xcd, 0x03, 0xc3 };   /* int $0x3; ret */
-#elif defined(__arm__)
-static const DWORD breakpoint_code[] = { 0xe1200070, 0xe12fff1e };  /* bkpt #0; bx lr */
-#elif defined(__aarch64__)
-static const DWORD breakpoint_code[] = { 0xd4200000, 0xd65f03c0 };  /* brk #0; ret */
-#endif
+static const BYTE breakpoint_code[] = {
+    0xcd, 0x03,                   /* int $0x3 */
+    0xc3,                         /* ret */
+};
 
 static void test_breakpoint(DWORD numexc)
 {
@@ -5117,6 +3272,7 @@ static void test_vectored_continue_handler(void)
     ret = pRtlRemoveVectoredContinueHandler((void *)0x11223344);
     ok(!ret, "RtlRemoveVectoredContinueHandler succeeded\n");
 }
+#endif /* defined(__i386__) || defined(__x86_64__) */
 
 static DWORD WINAPI suspend_thread_test( void *arg )
 {
@@ -5454,7 +3610,6 @@ START_TEST(exception)
     X(RtlRemoveVectoredExceptionHandler);
     X(RtlAddVectoredContinueHandler);
     X(RtlRemoveVectoredContinueHandler);
-    X(RtlSetUnhandledExceptionFilter);
     X(NtQueryInformationProcess);
     X(NtQueryInformationThread);
     X(NtSetInformationProcess);
@@ -5465,6 +3620,8 @@ START_TEST(exception)
 #undef X
 
     pIsWow64Process = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process");
+
+#ifdef __i386__
     if (!pIsWow64Process || !pIsWow64Process( GetCurrentProcess(), &is_wow64 )) is_wow64 = FALSE;
 
     if (pRtlAddVectoredExceptionHandler && pRtlRemoveVectoredExceptionHandler)
@@ -5491,7 +3648,6 @@ START_TEST(exception)
             return;
         }
 
-#if defined(__i386__) || defined(__x86_64__)
         if (pRtlRaiseException)
         {
             test_stage = 1;
@@ -5502,48 +3658,55 @@ START_TEST(exception)
             run_rtlraiseexception_test(0x12345);
             run_rtlraiseexception_test(EXCEPTION_BREAKPOINT);
             run_rtlraiseexception_test(EXCEPTION_INVALID_HANDLE);
+            test_stage = 3;
+            test_outputdebugstring(0, FALSE);
+            test_stage = 4;
+            test_outputdebugstring(2, TRUE); /* is this a Windows bug? */
+            test_stage = 5;
+            test_ripevent(0);
+            test_stage = 6;
+            test_ripevent(1);
+            test_stage = 7;
+            test_debug_service(0);
+            test_stage = 8;
+            test_debug_service(1);
+            test_stage = 9;
+            test_breakpoint(0);
+            test_stage = 10;
+            test_breakpoint(1);
+            test_stage = 11;
+            test_closehandle(0, (HANDLE)0xdeadbeef);
+            test_stage = 12;
+            test_closehandle(1, (HANDLE)0xdeadbeef);
+            test_stage = 13;
+            test_closehandle(0, 0); /* Special case. */
         }
-        else skip( "RtlRaiseException not found\n" );
-#endif
-        test_stage = 3;
-        test_outputdebugstring(0, FALSE);
-        test_stage = 4;
-        test_outputdebugstring(2, TRUE); /* is this a Windows bug? */
-        test_stage = 5;
-        test_ripevent(0);
-        test_stage = 6;
-        test_ripevent(1);
-        test_stage = 7;
-        test_debug_service(0);
-        test_stage = 8;
-        test_debug_service(1);
-        test_stage = 9;
-        test_breakpoint(0);
-        test_stage = 10;
-        test_breakpoint(1);
-        test_stage = 11;
-        test_closehandle(0, (HANDLE)0xdeadbeef);
-        test_stage = 12;
-        test_closehandle(1, (HANDLE)0xdeadbeef);
-        test_stage = 13;
-        test_closehandle(0, 0); /* Special case. */
+        else
+            skip( "RtlRaiseException not found\n" );
 
         /* rest of tests only run in parent */
         return;
     }
 
-#ifdef __i386__
-
     test_unwind();
     test_exceptions();
     test_rtlraiseexception();
     test_debug_registers();
+    test_outputdebugstring(1, FALSE);
+    test_ripevent(1);
     test_debug_service(1);
+    test_breakpoint(1);
+    test_closehandle(0, (HANDLE)0xdeadbeef);
+    test_vectored_continue_handler();
+    test_debugger();
     test_simd_exceptions();
     test_fpu_exceptions();
     test_dpe_exceptions();
     test_prot_fault();
-    test_kiuserexceptiondispatcher();
+    test_thread_context();
+    test_suspend_thread();
+    test_suspend_process();
+    test_unload_trace();
 
 #elif defined(__x86_64__)
 
@@ -5566,39 +3729,30 @@ START_TEST(exception)
     p_setjmp                           = (void *)GetProcAddress( hmsvcrt,
                                                                  "_setjmp" );
 
-    test_rtlraiseexception();
     test_debug_registers();
+    test_outputdebugstring(1, FALSE);
+    test_ripevent(1);
     test_debug_service(1);
+    test_breakpoint(1);
+    test_closehandle(0, (HANDLE)0xdeadbeef);
+    test_vectored_continue_handler();
     test_virtual_unwind();
     test___C_specific_handler();
     test_restore_context();
     test_prot_fault();
     test_dpe_exceptions();
     test_wow64_context();
+    test_suspend_thread();
+    test_suspend_process();
+    test_unload_trace();
     test_kiuserexceptiondispatcher();
-    test_nested_exception();
 
     if (pRtlAddFunctionTable && pRtlDeleteFunctionTable && pRtlInstallFunctionTableCallback && pRtlLookupFunctionEntry)
       test_dynamic_unwind();
     else
       skip( "Dynamic unwind functions not found\n" );
+
 #endif
 
-    test_debugger();
-    test_thread_context();
-    test_outputdebugstring(1, FALSE);
-    test_ripevent(1);
-    test_breakpoint(1);
-    test_closehandle(0, (HANDLE)0xdeadbeef);
-    /* Call of Duty WWII writes to BeingDebugged then closes an invalid handle,
-     * crashing the game if an exception is raised. */
-    NtCurrentTeb()->Peb->BeingDebugged = 0x98;
-    test_closehandle(0, (HANDLE)0xdeadbeef);
-    NtCurrentTeb()->Peb->BeingDebugged = 0;
-
-    test_vectored_continue_handler();
-    test_suspend_thread();
-    test_suspend_process();
-    test_unload_trace();
     VirtualFree(code_mem, 0, MEM_RELEASE);
 }

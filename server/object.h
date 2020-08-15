@@ -105,7 +105,6 @@ struct object
     struct list               wait_queue;
     struct object_name       *name;
     struct security_descriptor *sd;
-    unsigned int              is_permanent:1;
 #ifdef DEBUG_OBJECTS
     struct list               obj_list;
 #endif
@@ -144,7 +143,6 @@ extern void *open_named_object( struct object *parent, const struct object_ops *
                                 const struct unicode_str *name, unsigned int attributes );
 extern void unlink_named_object( struct object *obj );
 extern void make_object_static( struct object *obj );
-extern void make_object_temporary( struct object *obj );
 extern struct namespace *create_namespace( unsigned int hash_size );
 extern void free_kernel_objects( struct object *obj );
 /* grab/release_object can take any pointer, but you better make sure */
@@ -246,9 +244,6 @@ extern void init_directories(void);
 extern struct object *create_obj_symlink( struct object *root, const struct unicode_str *name,
                                           unsigned int attr, struct object *target,
                                           const struct security_descriptor *sd );
-extern struct object *create_symlink( struct object *root, const struct unicode_str *name,
-                                      unsigned int attr, const struct unicode_str *target,
-                                      const struct security_descriptor *sd );
 
 /* global variables */
 

@@ -1261,6 +1261,10 @@ then
 #include <X11/extensions/Xrandr.h>]], [[static typeof(XRRSetScreenConfigAndRate) * func; if (func) return 0;]])],
                   [WINE_CHECK_SONAME(Xrandr,XRRQueryExtension,
                     [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <X11/Xlib.h>
+#include <X11/extensions/Xrandr.h>]], [[static typeof(XRRGetScreenResources) *f; if (f) return 0;]])],
+                      [AC_DEFINE(HAVE_XRRGETSCREENRESOURCES, 1,
+                        [Define if Xrandr has the XRRGetScreenResources function])])
+                     AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <X11/Xlib.h>
 #include <X11/extensions/Xrandr.h>]], [[static typeof(XRRGetProviderResources) *f; if (f) return 0;]])],
                       [AC_DEFINE(HAVE_XRRGETPROVIDERRESOURCES, 1,
                         [Define if Xrandr has the XRRGetProviderResources function])],
@@ -2670,12 +2674,6 @@ AC_CHECK_MEMBERS([struct ifreq.ifr_hwaddr],,,
 #endif
 #ifdef HAVE_NET_IF_H
 # include <net/if.h>
-#endif])
-
-dnl Check for struct sysinfo members totalram and mem_unit
-AC_CHECK_MEMBERS([struct sysinfo.totalram, struct sysinfo.mem_unit],,,
-[#ifdef HAVE_SYS_SYSINFO_H
-# include <sys/sysinfo.h>
 #endif])
 
 dnl Check for isfinite

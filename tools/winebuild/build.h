@@ -175,10 +175,9 @@ struct strarray
 #define FLAG_REGISTER  0x0010  /* use register calling convention */
 #define FLAG_PRIVATE   0x0020  /* function is private (cannot be imported) */
 #define FLAG_ORDINAL   0x0040  /* function should be imported by ordinal */
-#define FLAG_THISCALL  0x0080  /* function uses thiscall calling convention */
-#define FLAG_FASTCALL  0x0100  /* function uses fastcall calling convention */
-#define FLAG_SYSCALL   0x0200  /* function is a system call */
-#define FLAG_IMPORT    0x0400  /* export is imported from another module */
+#define FLAG_THISCALL  0x0080  /* use thiscall calling convention */
+#define FLAG_FASTCALL  0x0100  /* use fastcall calling convention */
+#define FLAG_IMPORT    0x0200  /* export is imported from another module */
 
 #define FLAG_FORWARD   0x1000  /* function is a forwarded name */
 #define FLAG_EXT_LINK  0x2000  /* function links to an external symbol */
@@ -276,7 +275,6 @@ extern void free_dll_spec( DLLSPEC *spec );
 extern char *make_c_identifier( const char *str );
 extern const char *get_stub_name( const ORDDEF *odp, const DLLSPEC *spec );
 extern const char *get_link_name( const ORDDEF *odp );
-extern int sort_func_list( ORDDEF **list, int count, int (*compare)(const void *, const void *) );
 extern int get_cpu_from_name( const char *name );
 extern unsigned int get_alignment(unsigned int align);
 extern unsigned int get_page_size(void);
@@ -304,7 +302,6 @@ extern int has_imports(void);
 extern void output_get_pc_thunk(void);
 extern void output_module( DLLSPEC *spec );
 extern void output_stubs( DLLSPEC *spec );
-extern void output_syscalls( DLLSPEC *spec );
 extern void output_imports( DLLSPEC *spec );
 extern void output_static_lib( DLLSPEC *spec, char **argv );
 extern void output_exports( DLLSPEC *spec );

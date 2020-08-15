@@ -100,6 +100,15 @@ struct process
     struct list          kernel_object;   /* list of kernel object pointers */
 };
 
+struct process_snapshot
+{
+    struct process *process;  /* process ptr */
+    int             count;    /* process refcount */
+    int             threads;  /* number of threads */
+    int             priority; /* priority class */
+    int             handles;  /* number of handles */
+};
+
 #define CPU_FLAG(cpu) (1 << (cpu))
 #define CPU_64BIT_MASK (CPU_FLAG(CPU_x86_64) | CPU_FLAG(CPU_ARM64))
 
@@ -128,11 +137,12 @@ extern void kill_process( struct process *process, int violent_death );
 extern void kill_console_processes( struct thread *renderer, int exit_code );
 extern void kill_debugged_processes( struct thread *debugger, int exit_code );
 extern void detach_debugged_processes( struct thread *debugger );
+extern struct process_snapshot *process_snap( int *count );
 extern void enum_processes( int (*cb)(struct process*, void*), void *user);
 
 /* console functions */
-extern obj_handle_t inherit_console( struct thread *parent_thread, struct process *parent,
-                                     struct process *process, obj_handle_t hconin );
+extern void inherit_console( struct thread *parent_thread, struct process *parent,
+                             struct process *process, obj_handle_t hconin );
 extern int free_console( struct process *process );
 extern struct thread *console_get_renderer( struct console_input *console );
 

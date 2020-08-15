@@ -147,10 +147,12 @@ static BOOL process_attach( HMODULE module )
             LoadLibraryA( "krnl386.exe16" );
     }
 
+    /* finish the process initialisation for console bits, if needed */
+    RtlAddVectoredExceptionHandler( FALSE, CONSOLE_HandleCtrlC );
+
     if (params->ConsoleHandle == KERNEL32_CONSOLE_ALLOC)
     {
         HMODULE mod = GetModuleHandleA(0);
-        params->ConsoleHandle = NULL;
         if (RtlImageNtHeader(mod)->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
             AllocConsole();
     }
