@@ -1462,7 +1462,7 @@ static int move_files(FILE_OPERATION *op, BOOL multidest, const FILE_LIST *flFro
         return ERROR_CANCELLED;
     }
 
-    if (!multidest && !flFrom->bAnyDirectories &&
+    if (!multidest && !flFrom->bAnyDirectories && !flFrom->bAnyFromWildcard &&
         flFrom->dwNumFiles > flTo->dwNumFiles)
     {
         return ERROR_CANCELLED;
