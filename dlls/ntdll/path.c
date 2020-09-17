@@ -651,10 +651,7 @@ static ULONG get_full_path_helper(LPCWSTR name, LPWSTR buffer, ULONG size)
 
     RtlAcquirePebLock();
 
-    if (NtCurrentTeb()->Tib.SubSystemTib)  /* FIXME: hack */
-        cd = &((WIN16_SUBSYSTEM_TIB *)NtCurrentTeb()->Tib.SubSystemTib)->curdir.DosPath;
-    else
-        cd = &NtCurrentTeb()->Peb->ProcessParameters->CurrentDirectory.DosPath;
+    cd = &NtCurrentTeb()->Peb->ProcessParameters->CurrentDirectory.DosPath;
 
     switch (RtlDetermineDosPathNameType_U(name))
     {
