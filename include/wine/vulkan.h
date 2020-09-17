@@ -2293,8 +2293,8 @@ typedef VkResolveModeFlagBits VkResolveModeFlagBitsKHR;
 
 typedef enum VkResult
 {
-    VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT = -1000255000,
     VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS = -1000257000,
+    VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT = -1000255000,
     VK_ERROR_NOT_PERMITTED_EXT = -1000174001,
     VK_ERROR_FRAGMENTATION = -1000161000,
     VK_ERROR_INVALID_EXTERNAL_HANDLE = -1000072003,
@@ -4949,18 +4949,18 @@ typedef struct VkSurfaceCapabilitiesFullScreenExclusiveEXT
     VkBool32 fullScreenExclusiveSupported;
 } VkSurfaceCapabilitiesFullScreenExclusiveEXT;
 
+typedef struct VkSurfaceFormatKHR
+{
+    VkFormat format;
+    VkColorSpaceKHR colorSpace;
+} VkSurfaceFormatKHR;
+
 typedef struct VkSurfaceFullScreenExclusiveWin32InfoEXT
 {
     VkStructureType sType;
     const void *pNext;
     HMONITOR hmonitor;
 } VkSurfaceFullScreenExclusiveWin32InfoEXT;
-
-typedef struct VkSurfaceFormatKHR
-{
-    VkFormat format;
-    VkColorSpaceKHR colorSpace;
-} VkSurfaceFormatKHR;
 
 typedef struct VkTextureLODGatherFormatPropertiesAMD
 {
@@ -5950,6 +5950,13 @@ typedef struct VkSurfaceCapabilitiesKHR
     VkImageUsageFlags supportedUsageFlags;
 } VkSurfaceCapabilitiesKHR;
 
+typedef struct VkSurfaceFullScreenExclusiveInfoEXT
+{
+    VkStructureType sType;
+    void *pNext;
+    VkFullScreenExclusiveEXT fullScreenExclusive;
+} VkSurfaceFullScreenExclusiveInfoEXT;
+
 typedef struct VkSwapchainCreateInfoKHR
 {
     VkStructureType sType;
@@ -6894,13 +6901,6 @@ typedef struct VkStencilOpState
     uint32_t writeMask;
     uint32_t reference;
 } VkStencilOpState;
-
-typedef struct VkSurfaceFullScreenExclusiveInfoEXT
-{
-    VkStructureType sType;
-    void *pNext;
-    VkFullScreenExclusiveEXT fullScreenExclusive;
-} VkSurfaceFullScreenExclusiveInfoEXT;
 
 typedef struct VkVertexInputBindingDivisorDescriptionEXT
 {
