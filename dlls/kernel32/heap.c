@@ -158,29 +158,17 @@ BOOL WINAPI HeapDestroy( HANDLE heap /* [in] Handle of heap */ )
  */
 
 #define MAGIC_GLOBAL_USED 0x5342
-#define HANDLE_TO_INTERN(h)  ((PGLOBAL32_INTERN)(((char *)(h))-2))
-#define INTERN_TO_HANDLE(i)  (&((i)->Pointer))
-#define POINTER_TO_HANDLE(p) (*(((const HGLOBAL *)(p))-2))
+#define HANDLE_TO_INTERN(h)  ((struct local_header*)(((char *)(h))-2))
+#define INTERN_TO_HANDLE(i)  (&((i)->ptr))
+#define POINTER_TO_HANDLE(p) (*(((const HGLOBAL *)(p))-1))
 #define ISHANDLE(h)          (((ULONG_PTR)(h)&2)!=0)
 #define ISPOINTER(h)         (((ULONG_PTR)(h)&2)==0)
-/* align the storage needed for the HGLOBAL on an 8byte boundary thus
- * GlobalAlloc/GlobalReAlloc'ing with GMEM_MOVEABLE of memory with
- * size = 8*k, where k=1,2,3,... alloc's exactly the given size.
- * The Minolta DiMAGE Image Viewer heavily relies on this, corrupting
- * the output jpeg's > 1 MB if not */
-#define HGLOBAL_STORAGE      (sizeof(HGLOBAL)*2)
+#define HGLOBAL_STORAGE      (sizeof(HGLOBAL))
 
-#include "pshpack1.h"
-
-typedef struct __GLOBAL32_INTERN
+static inline BOOL is_win9x(void)
 {
-   WORD         Magic;
-   LPVOID       Pointer;
-   BYTE         Flags;
-   BYTE         LockCount;
-} GLOBAL32_INTERN, *PGLOBAL32_INTERN;
-
-#include "poppack.h"
+    return GetVersion() & 0x80000000;
+}
 
 /***********************************************************************
  *           GlobalLock   (KERNEL32.@)
@@ -240,8 +228,8 @@ HGLOBAL WINAPI GlobalHandle(
                  LPCVOID pmem /* [in] Pointer to global memory block */
 ) {
     HGLOBAL handle;
-    PGLOBAL32_INTERN  maybe_intern;
-    LPCVOID test;
+    struct local_header *maybe_intern;
+    const char *test;
 
     if (!pmem)
     {
@@ -254,23 +242,33 @@ HGLOBAL WINAPI GlobalHandle(
     {
         handle = 0;
 
-        /* note that if pmem is a pointer to a block allocated by        */
-        /* GlobalAlloc with GMEM_MOVEABLE then magic test in HeapValidate  */
-        /* will fail.                                                      */
         if (ISPOINTER(pmem)) {
-            if (HeapValidate( GetProcessHeap(), HEAP_NO_SERIALIZE, pmem )) {
-                handle = (HGLOBAL)pmem;  /* valid fixed block */
-                break;
+            if (is_win9x()) {
+                /* note that if pmem is a pointer to a block allocated by        */
+                /* GlobalAlloc with GMEM_MOVEABLE then magic test in HeapValidate  */
+                /* will fail.                                                      */
+                if (HeapValidate( GetProcessHeap(), HEAP_NO_SERIALIZE, pmem )) {
+                    handle = (HGLOBAL)pmem;  /* valid fixed block */
+                    break;
+                }
+                handle = POINTER_TO_HANDLE(pmem);
+                maybe_intern = HANDLE_TO_INTERN( handle );
+            } else {
+                maybe_intern = wine_hlocal_hashtable_find_unlocked(pmem);
+                if (maybe_intern)
+                    handle = INTERN_TO_HANDLE(maybe_intern); /* GMEM_MOVEABLE */
+                else
+                    break; /* GMEM_FIXED */
             }
-            handle = POINTER_TO_HANDLE(pmem);
         } else
             handle = (HGLOBAL)pmem;
 
         /* Now test handle either passed in or retrieved from pointer */
-        maybe_intern = HANDLE_TO_INTERN( handle );
-        if (maybe_intern->Magic == MAGIC_GLOBAL_USED) {
-            test = maybe_intern->Pointer;
-            if (HeapValidate( GetProcessHeap(), HEAP_NO_SERIALIZE, (const char *)test - HGLOBAL_STORAGE ) && /* obj(-handle) valid arena? */
+        if (maybe_intern->magic == MAGIC_GLOBAL_USED) {
+            test = maybe_intern->ptr;
+            if (is_win9x())
+                test -= HGLOBAL_STORAGE;
+            if (HeapValidate( GetProcessHeap(), HEAP_NO_SERIALIZE, test ) && /* obj(-handle) valid arena? */
                 HeapValidate( GetProcessHeap(), HEAP_NO_SERIALIZE, maybe_intern ))  /* intern valid arena? */
                 break;  /* valid moveable block */
         }
@@ -323,7 +321,7 @@ HGLOBAL WINAPI GlobalReAlloc( HGLOBAL hmem, SIZE_T size, UINT flags )
 SIZE_T WINAPI GlobalSize(HGLOBAL hmem)
 {
    SIZE_T               retval;
-   PGLOBAL32_INTERN     pintern;
+   struct local_header *pintern;
 
    if (!((ULONG_PTR)hmem >> 16))
    {
@@ -335,7 +333,7 @@ SIZE_T WINAPI GlobalSize(HGLOBAL hmem)
    {
       retval=HeapSize(GetProcessHeap(), 0, hmem);
 
-      if (retval == ~0ul) /* It might be a GMEM_MOVEABLE data pointer */
+      if (is_win9x() && retval == ~0ul) /* It might be a GMEM_MOVEABLE data pointer */
       {
           retval = HeapSize(GetProcessHeap(), 0, (char*)hmem - HGLOBAL_STORAGE);
           if (retval != ~0ul) retval -= HGLOBAL_STORAGE;
@@ -346,19 +344,22 @@ SIZE_T WINAPI GlobalSize(HGLOBAL hmem)
       RtlLockHeap(GetProcessHeap());
       pintern=HANDLE_TO_INTERN(hmem);
 
-      if(pintern->Magic==MAGIC_GLOBAL_USED)
+      if(pintern->magic==MAGIC_GLOBAL_USED)
       {
-         if (!pintern->Pointer) /* handle case of GlobalAlloc( ??,0) */
+         if (!pintern->ptr) /* handle case of GlobalAlloc( ??,0) */
              retval = 0;
          else
          {
-             retval = HeapSize(GetProcessHeap(), 0, (char *)pintern->Pointer - HGLOBAL_STORAGE );
-             if (retval != ~0ul) retval -= HGLOBAL_STORAGE;
+             const char *ptr = pintern->ptr;
+             if (is_win9x())
+                 ptr -= HGLOBAL_STORAGE;
+             retval = HeapSize(GetProcessHeap(), 0, ptr );
+             if (is_win9x() && retval != ~0ul) retval -= HGLOBAL_STORAGE;
          }
       }
       else
       {
-         WARN("invalid handle %p (Magic: 0x%04x)\n", hmem, pintern->Magic);
+         WARN("invalid handle %p (magic: 0x%04x)\n", hmem, pintern->magic);
          SetLastError(ERROR_INVALID_HANDLE);
          retval=0;
       }
@@ -421,7 +422,7 @@ VOID WINAPI GlobalUnfix(HGLOBAL hmem)
 UINT WINAPI GlobalFlags(HGLOBAL hmem)
 {
    DWORD                retval;
-   PGLOBAL32_INTERN     pintern;
+   struct local_header *pintern;
 
    if(ISPOINTER(hmem))
    {
@@ -431,15 +432,15 @@ UINT WINAPI GlobalFlags(HGLOBAL hmem)
    {
       RtlLockHeap(GetProcessHeap());
       pintern=HANDLE_TO_INTERN(hmem);
-      if(pintern->Magic==MAGIC_GLOBAL_USED)
+      if(pintern->magic==MAGIC_GLOBAL_USED)
       {
-         retval=pintern->LockCount + (pintern->Flags<<8);
-         if(pintern->Pointer==0)
+         retval=pintern->lock + (pintern->flags<<8);
+         if(pintern->ptr==0)
             retval|= GMEM_DISCARDED;
       }
       else
       {
-         WARN("invalid handle %p (Magic: 0x%04x)\n", hmem, pintern->Magic);
+         WARN("invalid handle %p (magic: 0x%04x)\n", hmem, pintern->magic);
          SetLastError(ERROR_INVALID_HANDLE);
          retval = GMEM_INVALID_HANDLE;
       }
