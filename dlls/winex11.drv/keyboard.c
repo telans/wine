@@ -33,6 +33,9 @@
 #ifdef HAVE_X11_XKBLIB_H
 #include <X11/XKBlib.h>
 #endif
+#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
+#include <X11/extensions/XInput2.h>
+#endif
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -1149,7 +1152,7 @@ static void X11DRV_send_keyboard_input( HWND hwnd, WORD vkey, WORD scan, DWORD f
     input.u.ki.time        = time;
     input.u.ki.dwExtraInfo = 0;
 
-    __wine_send_input( hwnd, &input );
+    __wine_send_input( hwnd, &input, SEND_HWMSG_WINDOW );
 }
 
 
@@ -1466,6 +1469,43 @@ static WCHAR translate_keysym( Display *display, KeySym keysym )
 
     return ret;
 }
+
+
+#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
+/***********************************************************************
+ *           X11DRV_KeyEvent
+ *
+ * Handle a raw XInput2 key event for background windows
+ */
+BOOL X11DRV_RawKeyEvent( XGenericEventCookie *cookie )
+{
+    XIRawEvent *event = cookie->data;
+    DWORD flags;
+    WORD vkey, scan;
+    INPUT input;
+
+    vkey = keyc2vkey[event->detail];
+    scan = keyc2scan[event->detail];
+
+    flags = 0;
+    if ( event->evtype == XI_RawKeyRelease ) flags |= KEYEVENTF_KEYUP;
+    if ( vkey & 0x100 ) flags |= KEYEVENTF_EXTENDEDKEY;
+
+    TRACE_(key)( "vkey=%04x scan=%04x flags=%04x\n", vkey, scan, flags );
+
+    input.type             = INPUT_KEYBOARD;
+    input.u.ki.wVk         = vkey & 0xff;
+    input.u.ki.wScan       = scan & 0xff;
+    input.u.ki.dwFlags     = flags;
+    input.u.ki.time        = EVENT_x11_time_to_win32_time(event->time);
+    input.u.ki.dwExtraInfo = 0;
+
+    __wine_send_input( 0, &input, SEND_HWMSG_RAWINPUT );
+
+    return TRUE;
+}
+#endif
+
 
 /**********************************************************************
  *		X11DRV_KEYBOARD_DetectLayout
@@ -2010,13 +2050,24 @@ BOOL X11DRV_MappingNotify( HWND dummy, XEvent *event )
 {
     HWND hwnd;
 
-    XRefreshKeyboardMapping(&event->xmapping);
-    X11DRV_InitKeyboard( event->xmapping.display );
+    switch (event->xmapping.request)
+    {
+    case MappingModifier:
+    case MappingKeyboard:
+        XRefreshKeyboardMapping( &event->xmapping );
+        X11DRV_InitKeyboard( event->xmapping.display );
 
-    hwnd = GetFocus();
-    if (!hwnd) hwnd = GetActiveWindow();
-    PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST,
-                 0 /*FIXME*/, (LPARAM)X11DRV_GetKeyboardLayout(0));
+        hwnd = GetFocus();
+        if (!hwnd) hwnd = GetActiveWindow();
+        PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST,
+                     0 /*FIXME*/, (LPARAM)X11DRV_GetKeyboardLayout(0));
+        break;
+
+    case MappingPointer:
+        X11DRV_InitMouse( event->xmapping.display );
+        break;
+    }
+
     return TRUE;
 }
 

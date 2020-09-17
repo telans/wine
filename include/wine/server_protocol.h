@@ -308,6 +308,13 @@ struct hardware_msg_data
             int            y;
             unsigned int   data;
         } mouse;
+        struct
+        {
+            int            type;
+            obj_handle_t   device;
+            unsigned int   length;
+
+        } hid;
     } rawinput;
 };
 
@@ -354,7 +361,19 @@ typedef union
         unsigned int   msg;
         lparam_t       lparam;
     } hw;
+    struct
+    {
+        int            type;
+        obj_handle_t   device;
+        unsigned char  usage_page;
+        unsigned char  usage;
+        unsigned int   length;
+    } hid;
 } hw_input_t;
+#define HW_INPUT_MOUSE    0
+#define HW_INPUT_KEYBOARD 1
+#define HW_INPUT_HARDWARE 2
+#define HW_INPUT_HID      3
 
 typedef union
 {
@@ -3242,6 +3261,7 @@ struct send_hardware_message_request
     user_handle_t   win;
     hw_input_t      input;
     unsigned int    flags;
+    /* VARARG(data,bytes); */
     char __pad_52[4];
 };
 struct send_hardware_message_reply
@@ -3256,6 +3276,8 @@ struct send_hardware_message_reply
     char __pad_28[4];
 };
 #define SEND_HWMSG_INJECTED    0x01
+#define SEND_HWMSG_RAWINPUT    0x02
+#define SEND_HWMSG_WINDOW      0x04
 
 
 
@@ -5834,6 +5856,19 @@ struct update_rawinput_devices_reply
 };
 
 
+struct get_rawinput_devices_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_rawinput_devices_reply
+{
+    struct reply_header __header;
+    unsigned int device_count;
+    /* VARARG(devices,rawinput_devices); */
+    char __pad_12[4];
+};
+
 
 struct create_job_request
 {
@@ -6362,6 +6397,7 @@ enum request
     REQ_free_user_handle,
     REQ_set_cursor,
     REQ_update_rawinput_devices,
+    REQ_get_rawinput_devices,
     REQ_create_job,
     REQ_open_job,
     REQ_assign_job,
@@ -6682,6 +6718,7 @@ union generic_request
     struct free_user_handle_request free_user_handle_request;
     struct set_cursor_request set_cursor_request;
     struct update_rawinput_devices_request update_rawinput_devices_request;
+    struct get_rawinput_devices_request get_rawinput_devices_request;
     struct create_job_request create_job_request;
     struct open_job_request open_job_request;
     struct assign_job_request assign_job_request;
@@ -7000,6 +7037,7 @@ union generic_reply
     struct free_user_handle_reply free_user_handle_reply;
     struct set_cursor_reply set_cursor_reply;
     struct update_rawinput_devices_reply update_rawinput_devices_reply;
+    struct get_rawinput_devices_reply get_rawinput_devices_reply;
     struct create_job_reply create_job_reply;
     struct open_job_reply open_job_reply;
     struct assign_job_reply assign_job_reply;

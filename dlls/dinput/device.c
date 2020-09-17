@@ -1093,11 +1093,8 @@ HRESULT WINAPI IDirectInputDevice2WImpl_Acquire(LPDIRECTINPUTDEVICE8W iface)
     EnterCriticalSection(&This->crit);
     res = This->acquired ? S_FALSE : DI_OK;
     This->acquired = 1;
+    This->inputlost = 0;
     LeaveCriticalSection(&This->crit);
-    if (res != DI_OK) return res;
-
-    dinput_hooks_acquire_device(iface);
-    check_dinput_hooks(iface, TRUE);
 
     return res;
 }
@@ -1123,11 +1120,8 @@ HRESULT WINAPI IDirectInputDevice2WImpl_Unacquire(LPDIRECTINPUTDEVICE8W iface)
     EnterCriticalSection(&This->crit);
     res = !This->acquired ? DI_NOEFFECT : DI_OK;
     This->acquired = 0;
+    This->inputlost = 0;
     LeaveCriticalSection(&This->crit);
-    if (res != DI_OK) return res;
-
-    dinput_hooks_unacquire_device(iface);
-    check_dinput_hooks(iface, FALSE);
 
     return res;
 }
@@ -1851,9 +1845,7 @@ HRESULT WINAPI IDirectInputDevice2WImpl_Poll(LPDIRECTINPUTDEVICE8W iface)
     IDirectInputDeviceImpl *This = impl_from_IDirectInputDevice8W(iface);
 
     if (!This->acquired) return DIERR_NOTACQUIRED;
-
-    check_dinput_events();
-    return DI_OK;
+    return DI_NOEFFECT;
 }
 
 HRESULT WINAPI IDirectInputDevice2AImpl_Poll(LPDIRECTINPUTDEVICE8A iface)

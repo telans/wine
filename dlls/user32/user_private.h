@@ -173,10 +173,6 @@ struct wm_char_mapping_data
 
 #include <pshpack1.h>
 
-/* on windows the buffer capacity is quite large as well, enough to */
-/* hold up to 10s of 1kHz mouse rawinput events */
-#define RAWINPUT_BUFFER_SIZE (512*1024)
-
 /* this is the structure stored in TEB->Win32ClientInfo */
 /* no attempt is made to keep the layout compatible with the Windows one */
 struct user_thread_info
@@ -201,7 +197,7 @@ struct user_thread_info
     struct user_key_state_info   *key_state;              /* Cache of global key state */
     HWND                          top_window;             /* Desktop window */
     HWND                          msg_window;             /* HWND_MESSAGE parent window */
-    RAWINPUT                     *rawinput;               /* Rawinput buffer */
+    RAWINPUT                     *rawinput;
 };
 
 C_ASSERT( sizeof(struct user_thread_info) <= sizeof(((TEB *)0)->Win32ClientInfo) );
@@ -211,6 +207,7 @@ C_ASSERT( sizeof(struct user_thread_info) <= sizeof(((TEB *)0)->Win32ClientInfo)
 extern INT global_key_state_counter DECLSPEC_HIDDEN;
 extern BOOL (WINAPI *imm_register_window)(HWND) DECLSPEC_HIDDEN;
 extern void (WINAPI *imm_unregister_window)(HWND) DECLSPEC_HIDDEN;
+extern void (WINAPI *imm_activate_window)(HWND) DECLSPEC_HIDDEN;
 
 struct user_key_state_info
 {
@@ -240,10 +237,6 @@ extern HMODULE user32_module DECLSPEC_HIDDEN;
 
 struct dce;
 struct tagWND;
-
-struct hardware_msg_data;
-extern BOOL rawinput_from_hardware_message(RAWINPUT *rawinput, const struct hardware_msg_data *msg_data);
-extern RAWINPUT *rawinput_thread_data(void);
 
 extern void CLIPBOARD_ReleaseOwner( HWND hwnd ) DECLSPEC_HIDDEN;
 extern BOOL FOCUS_MouseActivate( HWND hwnd ) DECLSPEC_HIDDEN;
@@ -386,5 +379,7 @@ static inline WCHAR *heap_strdupW(const WCHAR *src)
     if ((dst = heap_alloc(len))) memcpy(dst, src, len);
     return dst;
 }
+
+extern HANDLE rawinput_handle_from_device_handle(HANDLE device, BOOL rescan);
 
 #endif /* __WINE_USER_PRIVATE_H */
