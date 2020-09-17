@@ -2627,7 +2627,6 @@ static void test_QueryInformationJobObject(void)
     PJOBOBJECT_BASIC_PROCESS_ID_LIST pid_list = (JOBOBJECT_BASIC_PROCESS_ID_LIST *)buf;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION ext_limit_info;
     JOBOBJECT_BASIC_LIMIT_INFORMATION *basic_limit_info = &ext_limit_info.BasicLimitInformation;
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION basic_accounting_info;
     DWORD ret_len;
     PROCESS_INFORMATION pi[2];
     char buffer[50];
@@ -2734,14 +2733,6 @@ static void test_QueryInformationJobObject(void)
     ok(ret, "QueryInformationJobObject error %u\n", GetLastError());
     ok(ret_len == sizeof(ext_limit_info), "QueryInformationJobObject returned ret_len=%u\n", ret_len);
     expect_eq_d(0, basic_limit_info->LimitFlags);
-
-    /* test JobObjectBasicAccountingInformation */
-    ret = pQueryInformationJobObject(job, JobObjectBasicAccountingInformation, &basic_accounting_info,
-                                     sizeof(basic_accounting_info), &ret_len);
-    ok(ret, "QueryInformationJobObject error %u\n", GetLastError());
-    ok(ret_len == sizeof(basic_accounting_info), "QueryInformationJobObject returned ret_len=%u\n", ret_len);
-    expect_eq_d(3, basic_accounting_info.TotalProcesses);
-    expect_eq_d(2, basic_accounting_info.ActiveProcesses);
 
     TerminateProcess(pi[0].hProcess, 0);
     CloseHandle(pi[0].hProcess);
@@ -3304,7 +3295,7 @@ static void test_SuspendProcessState(void)
     BOOL pipe_connected;
     ULONG pipe_magic, numb;
     BOOL ret;
-    void *user_thread_start, *start_ptr, *entry_ptr, *peb_ptr;
+    void *entry_ptr, *peb_ptr;
     PEB child_peb;
 
     exit_process_ptr = GetProcAddress(hkernel32, "ExitProcess");
@@ -3365,7 +3356,6 @@ static void test_SuspendProcessState(void)
     ok( ctx.EFlags == 0x200, "wrong flags %08x\n", ctx.EFlags );
     ok( ctx.MxCsr == 0x1f80, "wrong mxcsr %08x\n", ctx.MxCsr );
     ok( ctx.FltSave.ControlWord == 0x27f, "wrong control %08x\n", ctx.FltSave.ControlWord );
-    start_ptr = (void *)ctx.Rip;
     entry_ptr = (void *)ctx.Rcx;
     peb_ptr = (void *)ctx.Rdx;
 
@@ -3396,7 +3386,6 @@ static void test_SuspendProcessState(void)
     ok( (ctx.EFlags & ~2) == 0x200, "wrong flags %08x\n", ctx.EFlags );
     ok( (WORD)ctx.FloatSave.ControlWord == 0x27f, "wrong control %08x\n", ctx.FloatSave.ControlWord );
     ok( *(WORD *)ctx.ExtendedRegisters == 0x27f, "wrong control %08x\n", *(WORD *)ctx.ExtendedRegisters );
-    start_ptr = (void *)ctx.Eip;
     entry_ptr = (void *)ctx.Eax;
     peb_ptr = (void *)ctx.Ebx;
 
@@ -3420,10 +3409,6 @@ static void test_SuspendProcessState(void)
     ok( ret, "Failed to read PEB (%u)\n", GetLastError() );
     ok( child_peb.ImageBaseAddress == exe_base, "wrong base %p/%p\n",
         child_peb.ImageBaseAddress, exe_base );
-    user_thread_start = GetProcAddress( GetModuleHandleA("ntdll.dll"), "RtlUserThreadStart" );
-    if (user_thread_start)
-        ok( start_ptr == user_thread_start,
-            "wrong start addr %p / %p\n", start_ptr, user_thread_start );
     ok( entry_ptr == (char *)exe_base + nt_header.OptionalHeader.AddressOfEntryPoint,
         "wrong entry point %p/%p\n", entry_ptr,
         (char *)exe_base + nt_header.OptionalHeader.AddressOfEntryPoint );
@@ -3891,18 +3876,6 @@ static void test_ProcThreadAttributeList(void)
         expect_list.attrs[2].size = sizeof(PROCESSOR_NUMBER);
         expect_list.attrs[2].value = handles;
         expect_list.count++;
-    }
-
-    ret = pUpdateProcThreadAttribute(&list, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, handles, sizeof(handles[0]), NULL, NULL);
-    ok(ret || broken(GetLastError() == ERROR_NOT_SUPPORTED), "got %d gle %d\n", ret, GetLastError());
-
-    if (ret)
-    {
-        unsigned int i = expect_list.count++;
-        expect_list.mask |= 1 << ProcThreadAttributePseudoConsole;
-        expect_list.attrs[i].attr = PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE;
-        expect_list.attrs[i].size = sizeof(HPCON);
-        expect_list.attrs[i].value = handles;
     }
 
     ok(!memcmp(&list, &expect_list, size), "mismatch\n");
