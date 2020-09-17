@@ -218,6 +218,7 @@ DECL_HANDLER(is_same_mapping);
 DECL_HANDLER(create_snapshot);
 DECL_HANDLER(next_process);
 DECL_HANDLER(next_thread);
+DECL_HANDLER(list_processes);
 DECL_HANDLER(wait_debug_event);
 DECL_HANDLER(queue_exception_event);
 DECL_HANDLER(get_exception_status);
@@ -423,6 +424,7 @@ DECL_HANDLER(assign_job);
 DECL_HANDLER(process_in_job);
 DECL_HANDLER(set_job_limits);
 DECL_HANDLER(set_job_completion_port);
+DECL_HANDLER(get_job_info);
 DECL_HANDLER(terminate_job);
 DECL_HANDLER(suspend_process);
 DECL_HANDLER(resume_process);
@@ -537,6 +539,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_create_snapshot,
     (req_handler)req_next_process,
     (req_handler)req_next_thread,
+    (req_handler)req_list_processes,
     (req_handler)req_wait_debug_event,
     (req_handler)req_queue_exception_event,
     (req_handler)req_get_exception_status,
@@ -742,6 +745,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_process_in_job,
     (req_handler)req_set_job_limits,
     (req_handler)req_set_job_completion_port,
+    (req_handler)req_get_job_info,
     (req_handler)req_terminate_job,
     (req_handler)req_suspend_process,
     (req_handler)req_resume_process,
@@ -1412,6 +1416,10 @@ C_ASSERT( FIELD_OFFSET(struct next_thread_reply, base_pri) == 32 );
 C_ASSERT( FIELD_OFFSET(struct next_thread_reply, delta_pri) == 36 );
 C_ASSERT( FIELD_OFFSET(struct next_thread_reply, unix_tid) == 40 );
 C_ASSERT( sizeof(struct next_thread_reply) == 48 );
+C_ASSERT( sizeof(struct list_processes_request) == 16 );
+C_ASSERT( FIELD_OFFSET(struct list_processes_reply, info_size) == 8 );
+C_ASSERT( FIELD_OFFSET(struct list_processes_reply, process_count) == 12 );
+C_ASSERT( sizeof(struct list_processes_reply) == 16 );
 C_ASSERT( FIELD_OFFSET(struct wait_debug_event_request, get_handle) == 12 );
 C_ASSERT( sizeof(struct wait_debug_event_request) == 16 );
 C_ASSERT( FIELD_OFFSET(struct wait_debug_event_reply, pid) == 8 );
@@ -2523,6 +2531,11 @@ C_ASSERT( FIELD_OFFSET(struct set_job_completion_port_request, job) == 12 );
 C_ASSERT( FIELD_OFFSET(struct set_job_completion_port_request, port) == 16 );
 C_ASSERT( FIELD_OFFSET(struct set_job_completion_port_request, key) == 24 );
 C_ASSERT( sizeof(struct set_job_completion_port_request) == 32 );
+C_ASSERT( FIELD_OFFSET(struct get_job_info_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_job_info_request) == 16 );
+C_ASSERT( FIELD_OFFSET(struct get_job_info_reply, total_processes) == 8 );
+C_ASSERT( FIELD_OFFSET(struct get_job_info_reply, active_processes) == 12 );
+C_ASSERT( sizeof(struct get_job_info_reply) == 16 );
 C_ASSERT( FIELD_OFFSET(struct terminate_job_request, handle) == 12 );
 C_ASSERT( FIELD_OFFSET(struct terminate_job_request, status) == 16 );
 C_ASSERT( sizeof(struct terminate_job_request) == 24 );
