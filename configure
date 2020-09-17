@@ -12331,6 +12331,24 @@ _ACEOF
 int
 main ()
 {
+static typeof(XRRGetScreenResources) *f; if (f) return 0;
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"; then :
+
+$as_echo "#define HAVE_XRRGETSCREENRESOURCES 1" >>confdefs.h
+
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+                     cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+#include <X11/Xlib.h>
+#include <X11/extensions/Xrandr.h>
+int
+main ()
+{
 static typeof(XRRGetProviderResources) *f; if (f) return 0;
   ;
   return 0;
@@ -19674,32 +19692,6 @@ if test "x$ac_cv_member_struct_ifreq_ifr_hwaddr" = xyes; then :
 
 cat >>confdefs.h <<_ACEOF
 #define HAVE_STRUCT_IFREQ_IFR_HWADDR 1
-_ACEOF
-
-
-fi
-
-
-ac_fn_c_check_member "$LINENO" "struct sysinfo" "totalram" "ac_cv_member_struct_sysinfo_totalram" "#ifdef HAVE_SYS_SYSINFO_H
-# include <sys/sysinfo.h>
-#endif
-"
-if test "x$ac_cv_member_struct_sysinfo_totalram" = xyes; then :
-
-cat >>confdefs.h <<_ACEOF
-#define HAVE_STRUCT_SYSINFO_TOTALRAM 1
-_ACEOF
-
-
-fi
-ac_fn_c_check_member "$LINENO" "struct sysinfo" "mem_unit" "ac_cv_member_struct_sysinfo_mem_unit" "#ifdef HAVE_SYS_SYSINFO_H
-# include <sys/sysinfo.h>
-#endif
-"
-if test "x$ac_cv_member_struct_sysinfo_mem_unit" = xyes; then :
-
-cat >>confdefs.h <<_ACEOF
-#define HAVE_STRUCT_SYSINFO_MEM_UNIT 1
 _ACEOF
 
 

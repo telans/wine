@@ -659,7 +659,7 @@
 # @ stub GetDurationFormatEx
 @ stdcall -import GetDynamicTimeZoneInformation(ptr)
 @ stdcall -import GetDynamicTimeZoneInformationEffectiveYears(ptr ptr ptr)
-@ stdcall -import -ret64 -arch=i386,x86_64 GetEnabledXStateFeatures()
+@ stdcall -ret64 -arch=i386,x86_64 GetEnabledXStateFeatures()
 @ stdcall -import GetEnvironmentStrings()
 @ stdcall -import GetEnvironmentStringsA()
 @ stdcall -import GetEnvironmentStringsW()
@@ -1270,8 +1270,8 @@
 @ stdcall ReleaseSemaphoreWhenCallbackReturns(ptr long long) ntdll.TpCallbackReleaseSemaphoreOnCompletion
 @ stdcall ReleaseSRWLockExclusive(ptr) ntdll.RtlReleaseSRWLockExclusive
 @ stdcall ReleaseSRWLockShared(ptr) ntdll.RtlReleaseSRWLockShared
-@ stdcall -import RemoveDirectoryA(str)
-@ stdcall -import RemoveDirectoryW(wstr)
+@ stdcall RemoveDirectoryA(str)
+@ stdcall RemoveDirectoryW(wstr)
 # @ stub RemoveLocalAlternateComputerNameA
 # @ stub RemoveLocalAlternateComputerNameW
 @ stdcall RemoveVectoredContinueHandler(ptr) ntdll.RtlRemoveVectoredContinueHandler

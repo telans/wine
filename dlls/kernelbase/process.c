@@ -28,7 +28,6 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
-#include "wincontypes.h"
 #include "winternl.h"
 
 #include "kernelbase.h"
@@ -194,7 +193,6 @@ static RTL_USER_PROCESS_PARAMETERS *create_process_params( const WCHAR *filename
 
     if (flags & CREATE_NEW_PROCESS_GROUP) params->ConsoleFlags = 1;
     if (flags & CREATE_NEW_CONSOLE) params->ConsoleHandle = (HANDLE)1; /* KERNEL32_CONSOLE_ALLOC */
-    else if (!(flags & DETACHED_PROCESS)) params->ConsoleHandle = NtCurrentTeb()->Peb->ProcessParameters->ConsoleHandle;
 
     if (startup->dwFlags & STARTF_USESTDHANDLES)
     {
@@ -243,89 +241,26 @@ static RTL_USER_PROCESS_PARAMETERS *create_process_params( const WCHAR *filename
     return params;
 }
 
-struct proc_thread_attr
-{
-    DWORD_PTR attr;
-    SIZE_T size;
-    void *value;
-};
-
-struct _PROC_THREAD_ATTRIBUTE_LIST
-{
-    DWORD mask;  /* bitmask of items in list */
-    DWORD size;  /* max number of items in list */
-    DWORD count; /* number of items in list */
-    DWORD pad;
-    DWORD_PTR unk;
-    struct proc_thread_attr attrs[1];
-};
 
 /***********************************************************************
  *           create_nt_process
  */
 static NTSTATUS create_nt_process( SECURITY_ATTRIBUTES *psa, SECURITY_ATTRIBUTES *tsa,
                                    BOOL inherit, DWORD flags, RTL_USER_PROCESS_PARAMETERS *params,
-                                   RTL_USER_PROCESS_INFORMATION *info, HANDLE parent,
-                                   const struct proc_thread_attr *handle_list )
+                                   RTL_USER_PROCESS_INFORMATION *info, HANDLE parent )
 {
-    OBJECT_ATTRIBUTES process_attr, thread_attr;
-    PS_CREATE_INFO create_info;
-    ULONG_PTR buffer[offsetof( PS_ATTRIBUTE_LIST, Attributes[5] ) / sizeof(ULONG_PTR)];
-    PS_ATTRIBUTE_LIST *attr = (PS_ATTRIBUTE_LIST *)buffer;
-    UNICODE_STRING nameW;
     NTSTATUS status;
-    UINT pos = 0;
+    UNICODE_STRING nameW;
 
     if (!params->ImagePathName.Buffer[0]) return STATUS_OBJECT_PATH_NOT_FOUND;
     status = RtlDosPathNameToNtPathName_U_WithStatus( params->ImagePathName.Buffer, &nameW, NULL, NULL );
     if (!status)
     {
         params->DebugFlags = flags;  /* hack, cf. RtlCreateUserProcess implementation */
-
-        RtlNormalizeProcessParams( params );
-
-        attr->Attributes[pos].Attribute    = PS_ATTRIBUTE_IMAGE_NAME;
-        attr->Attributes[pos].Size         = nameW.Length;
-        attr->Attributes[pos].ValuePtr     = nameW.Buffer;
-        attr->Attributes[pos].ReturnLength = NULL;
-        pos++;
-        attr->Attributes[pos].Attribute    = PS_ATTRIBUTE_CLIENT_ID;
-        attr->Attributes[pos].Size         = sizeof(info->ClientId);
-        attr->Attributes[pos].ValuePtr     = &info->ClientId;
-        attr->Attributes[pos].ReturnLength = NULL;
-        pos++;
-        attr->Attributes[pos].Attribute    = PS_ATTRIBUTE_IMAGE_INFO;
-        attr->Attributes[pos].Size         = sizeof(info->ImageInformation);
-        attr->Attributes[pos].ValuePtr     = &info->ImageInformation;
-        attr->Attributes[pos].ReturnLength = NULL;
-        pos++;
-        if (parent)
-        {
-            attr->Attributes[pos].Attribute    = PS_ATTRIBUTE_PARENT_PROCESS;
-            attr->Attributes[pos].Size         = sizeof(parent);
-            attr->Attributes[pos].ValuePtr     = parent;
-            attr->Attributes[pos].ReturnLength = NULL;
-            pos++;
-        }
-        if (inherit && handle_list)
-        {
-            attr->Attributes[pos].Attribute    = PS_ATTRIBUTE_HANDLE_LIST;
-            attr->Attributes[pos].Size         = handle_list->size;
-            attr->Attributes[pos].ValuePtr     = handle_list->value;
-            attr->Attributes[pos].ReturnLength = NULL;
-            pos++;
-        }
-        attr->TotalLength = offsetof( PS_ATTRIBUTE_LIST, Attributes[pos] );
-
-        InitializeObjectAttributes( &process_attr, NULL, 0, NULL, psa ? psa->lpSecurityDescriptor : NULL );
-        InitializeObjectAttributes( &thread_attr, NULL, 0, NULL, tsa ? tsa->lpSecurityDescriptor : NULL );
-
-        status = NtCreateUserProcess( &info->Process, &info->Thread, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS,
-                                      &process_attr, &thread_attr,
-                                      inherit ? PROCESS_CREATE_FLAGS_INHERIT_HANDLES : 0,
-                                      THREAD_CREATE_FLAGS_CREATE_SUSPENDED, params,
-                                      &create_info, attr );
-
+        status = RtlCreateUserProcess( &nameW, OBJ_CASE_INSENSITIVE, params,
+                                       psa ? psa->lpSecurityDescriptor : NULL,
+                                       tsa ? tsa->lpSecurityDescriptor : NULL,
+                                       parent, inherit, 0, 0, info );
         RtlFreeUnicodeString( &nameW );
     }
     return status;
@@ -356,7 +291,7 @@ static NTSTATUS create_vdm_process( SECURITY_ATTRIBUTES *psa, SECURITY_ATTRIBUTE
               winevdm, params->ImagePathName.Buffer, params->CommandLine.Buffer );
     RtlInitUnicodeString( &params->ImagePathName, winevdm );
     RtlInitUnicodeString( &params->CommandLine, newcmdline );
-    status = create_nt_process( psa, tsa, inherit, flags, params, info, NULL, NULL );
+    status = create_nt_process( psa, tsa, inherit, flags, params, info, NULL );
     HeapFree( GetProcessHeap(), 0, newcmdline );
     return status;
 }
@@ -384,7 +319,7 @@ static NTSTATUS create_cmd_process( SECURITY_ATTRIBUTES *psa, SECURITY_ATTRIBUTE
     swprintf( newcmdline, len, L"%s /s/c \"%s\"", comspec, params->CommandLine.Buffer );
     RtlInitUnicodeString( &params->ImagePathName, comspec );
     RtlInitUnicodeString( &params->CommandLine, newcmdline );
-    status = create_nt_process( psa, tsa, inherit, flags, params, info, NULL, NULL );
+    status = create_nt_process( psa, tsa, inherit, flags, params, info, NULL );
     RtlFreeHeap( GetProcessHeap(), 0, newcmdline );
     return status;
 }
@@ -478,6 +413,23 @@ done:
     return ret;
 }
 
+struct proc_thread_attr
+{
+    DWORD_PTR attr;
+    SIZE_T size;
+    void *value;
+};
+
+struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD mask;  /* bitmask of items in list */
+    DWORD size;  /* max number of items in list */
+    DWORD count; /* number of items in list */
+    DWORD pad;
+    DWORD_PTR unk;
+    struct proc_thread_attr attrs[1];
+};
+
 /**********************************************************************
  *           CreateProcessInternalW   (kernelbase.@)
  */
@@ -488,7 +440,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                                                       const WCHAR *cur_dir, STARTUPINFOW *startup_info,
                                                       PROCESS_INFORMATION *info, HANDLE *new_token )
 {
-    const struct proc_thread_attr *handle_list = NULL;
     WCHAR name[MAX_PATH];
     WCHAR *p, *tidy_cmdline = cmd_line;
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
@@ -565,18 +516,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                             goto done;
                         }
                         break;
-                    case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
-                        handle_list = &attrs->attrs[i];
-                        TRACE("PROC_THREAD_ATTRIBUTE_HANDLE_LIST handle count %Iu.\n", attrs->attrs[i].size / sizeof(HANDLE));
-                        break;
-                    case PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE:
-                        {
-                            struct pseudo_console *console = attrs->attrs[i].value;
-                            TRACE( "PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE %p reference %p\n",
-                                   console, console->reference );
-                            params->ConsoleHandle = console->reference;
-                            break;
-                        }
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -585,7 +524,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         }
     }
 
-    status = create_nt_process( process_attr, thread_attr, inherit, flags, params, &rtl_info, parent, handle_list );
+    status = create_nt_process( process_attr, thread_attr, inherit, flags, params, &rtl_info, parent );
     switch (status)
     {
     case STATUS_SUCCESS:
@@ -1738,14 +1677,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH UpdateProcThreadAttribute( struct _PROC_THREAD_ATT
             return FALSE;
         }
         break;
-
-    case PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE:
-       if (size != sizeof(HPCON))
-       {
-           SetLastError( ERROR_BAD_LENGTH );
-           return FALSE;
-       }
-       break;
 
     default:
         SetLastError( ERROR_NOT_SUPPORTED );

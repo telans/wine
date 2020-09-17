@@ -2212,11 +2212,7 @@ static struct strarray add_import_libs( const struct makefile *make, struct stra
         const char *lib = NULL;
 
         /* skip module's own importlib, its object files will be linked directly */
-        if (make->importlib && !strcmp( make->importlib, imports.str[i] ))
-        {
-            if (!is_unix) continue;
-            if (strarray_exists( &make->extradllflags, "-nodefaultlibs" )) continue;
-        }
+        if (make->importlib && !is_unix && !strcmp( make->importlib, imports.str[i] )) continue;
 
         for (j = 0; j < top_makefile->subdirs.count; j++)
         {
@@ -3353,7 +3349,6 @@ static void output_module( struct makefile *make )
         strarray_add( &make->all_targets, unix_lib );
         add_install_rule( make, make->module, unix_lib, strmake( "p$(dlldir)/%s", unix_lib ));
         output( "%s:", unix_lib );
-        if (spec_file) output_filename( spec_file );
         output_filenames_obj_dir( make, make->unixobj_files );
         output_filenames( unix_deps );
         output_filename( tools_path( make, "winebuild" ));
@@ -3362,7 +3357,6 @@ static void output_module( struct makefile *make )
         output_winegcc_command( make, 0 );
         output_filename( "-munix" );
         output_filename( "-shared" );
-        if (spec_file) output_filename( spec_file );
         if (strarray_exists( &make->extradllflags, "-nodefaultlibs" )) output_filename( "-nodefaultlibs" );
         output_filenames_obj_dir( make, make->unixobj_files );
         output_filenames( unix_libs );

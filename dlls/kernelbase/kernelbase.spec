@@ -493,7 +493,7 @@
 # @ stub GetEffectivePackageStatusForUser
 # @ stub GetEightBitStringToUnicodeSizeRoutine
 # @ stub GetEightBitStringToUnicodeStringRoutine
-@ stdcall -ret64 -arch=i386,x86_64 GetEnabledXStateFeatures()
+@ stdcall -ret64 -arch=i386,x86_64 GetEnabledXStateFeatures() kernel32.GetEnabledXStateFeatures
 @ stdcall GetEnvironmentStrings() GetEnvironmentStringsA
 @ stdcall GetEnvironmentStringsA()
 @ stdcall GetEnvironmentStringsW()
@@ -1333,8 +1333,8 @@
 @ stdcall ReleaseSemaphoreWhenCallbackReturns(ptr long long) ntdll.TpCallbackReleaseSemaphoreOnCompletion
 # @ stub ReleaseStateLock
 @ stdcall RemapPredefinedHandleInternal(long long)
-@ stdcall RemoveDirectoryA(str)
-@ stdcall RemoveDirectoryW(wstr)
+@ stdcall RemoveDirectoryA(str) kernel32.RemoveDirectoryA
+@ stdcall RemoveDirectoryW(wstr) kernel32.RemoveDirectoryW
 @ stdcall RemoveDllDirectory(ptr)
 # @ stub RemovePackageStatus
 # @ stub RemovePackageStatusForUser

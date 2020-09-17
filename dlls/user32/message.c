@@ -2271,11 +2271,12 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
  * Tell the server we have passed the message to the app
  * (even though we may end up dropping it later on)
  */
-static void accept_hardware_message( UINT hw_id )
+static void accept_hardware_message( UINT hw_id, BOOL remove )
 {
     SERVER_START_REQ( accept_hardware_message )
     {
-        req->hw_id = hw_id;
+        req->hw_id   = hw_id;
+        req->remove  = remove;
         if (wine_server_call( req ))
             FIXME("Failed to reply to MSG_HARDWARE message. Message may not be removed from queue.\n");
     }
@@ -2283,14 +2284,13 @@ static void accept_hardware_message( UINT hw_id )
 }
 
 
-static BOOL process_rawinput_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
+static BOOL process_rawinput_message( MSG *msg, const struct hardware_msg_data *msg_data )
 {
-    struct rawinput_thread_data *thread_data = rawinput_thread_data();
-    if (!rawinput_from_hardware_message( thread_data->buffer, msg_data ))
+    RAWINPUT *rawinput = rawinput_thread_data();
+    if (!rawinput_from_hardware_message(rawinput, msg_data))
         return FALSE;
 
-    thread_data->hw_id = hw_id;
-    msg->lParam = (LPARAM)hw_id;
+    msg->lParam = (LPARAM)rawinput;
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
     return TRUE;
 }
@@ -2363,10 +2363,10 @@ static BOOL process_keyboard_message( MSG *msg, UINT hw_id, HWND hwnd_filter,
     {
         /* skip this message */
         HOOK_CallHooks( WH_CBT, HCBT_KEYSKIPPED, LOWORD(msg->wParam), msg->lParam, TRUE );
-        accept_hardware_message( hw_id );
+        accept_hardware_message( hw_id, TRUE );
         return FALSE;
     }
-    if (remove) accept_hardware_message( hw_id );
+    accept_hardware_message( hw_id, remove );
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
 
     if ( remove && msg->message == WM_KEYDOWN )
@@ -2421,7 +2421,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
 
     if (!msg->hwnd || !WIN_IsCurrentThread( msg->hwnd ))
     {
-        accept_hardware_message( hw_id );
+        accept_hardware_message( hw_id, TRUE );
         return FALSE;
     }
 
@@ -2517,7 +2517,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
         hook.s.dwExtraInfo  = extra_info;
         hook.mouseData      = msg->wParam;
         HOOK_CallHooks( WH_CBT, HCBT_CLICKSKIPPED, message, (LPARAM)&hook, TRUE );
-        accept_hardware_message( hw_id );
+        accept_hardware_message( hw_id, TRUE );
         return FALSE;
     }
 
@@ -2525,11 +2525,11 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     {
         SendMessageW( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd,
                       MAKELONG( hittest, msg->message ));
-        accept_hardware_message( hw_id );
+        accept_hardware_message( hw_id, TRUE );
         return FALSE;
     }
 
-    if (remove) accept_hardware_message( hw_id );
+    accept_hardware_message( hw_id, remove );
 
     if (!remove || info.hwndCapture)
     {
@@ -2611,7 +2611,7 @@ static BOOL process_hardware_message( MSG *msg, UINT hw_id, const struct hardwar
     context = SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE );
 
     if (msg->message == WM_INPUT)
-        ret = process_rawinput_message( msg, hw_id, msg_data );
+        ret = process_rawinput_message( msg, msg_data );
     else if (is_keyboard_message( msg->message ))
         ret = process_keyboard_message( msg, hw_id, hwnd_filter, first, last, remove );
     else if (is_mouse_message( msg->message ))
