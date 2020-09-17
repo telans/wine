@@ -59,6 +59,8 @@ static CRITICAL_SECTION context_section = { &critsect_debug, -1, 0, 0, 0, 0 };
 static XContext vulkan_hwnd_context;
 static XContext vulkan_swapchain_surface_context;
 
+static struct vulkan_funcs vulkan_funcs;
+
 #define VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR 1000004000
 
 struct wine_vk_surface
@@ -147,6 +149,13 @@ static BOOL WINAPI wine_vk_init(INIT_ONCE *once, void *param, void **context)
     LOAD_FUNCPTR(vkQueuePresentKHR);
     LOAD_OPTIONAL_FUNCPTR(vkGetDeviceGroupSurfacePresentModesKHR);
     LOAD_OPTIONAL_FUNCPTR(vkGetPhysicalDevicePresentRectanglesKHR);
+
+    if(!pvkGetPhysicalDeviceSurfaceCapabilities2KHR){
+        vulkan_funcs.p_vkGetPhysicalDeviceSurfaceCapabilities2KHR = NULL;
+    }
+    if(!pvkGetPhysicalDeviceSurfaceFormats2KHR){
+        vulkan_funcs.p_vkGetPhysicalDeviceSurfaceFormats2KHR = NULL;
+    }
 #undef LOAD_FUNCPTR
 #undef LOAD_OPTIONAL_FUNCPTR
 
@@ -653,7 +662,43 @@ static VkResult X11DRV_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *
     return res;
 }
 
-static const struct vulkan_funcs vulkan_funcs =
+static VkBool32 X11DRV_query_fs_hack(VkExtent2D *real_sz, VkExtent2D *user_sz,
+        VkRect2D *dst_blit, VkFilter *filter)
+{
+    if(fs_hack_enabled()){
+        POINT real_res = fs_hack_real_mode();
+        POINT user_res = fs_hack_current_mode();
+        POINT scaled = fs_hack_get_scaled_screen_size();
+        POINT scaled_origin = {0, 0};
+
+        if(filter)
+            *filter = fs_hack_is_integer() ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+
+        fs_hack_user_to_real(&scaled_origin);
+
+        if(real_sz){
+            real_sz->width = real_res.x;
+            real_sz->height = real_res.y;
+        }
+
+        if(user_sz){
+            user_sz->width = user_res.x;
+            user_sz->height = user_res.y;
+        }
+
+        if(dst_blit){
+            dst_blit->offset.x = scaled_origin.x;
+            dst_blit->offset.y = scaled_origin.y;
+            dst_blit->extent.width = scaled.x;
+            dst_blit->extent.height = scaled.y;
+        }
+
+        return VK_TRUE;
+    }
+    return VK_FALSE;
+}
+
+static struct vulkan_funcs vulkan_funcs =
 {
     X11DRV_vkCreateInstance,
     X11DRV_vkCreateSwapchainKHR,
@@ -675,6 +720,7 @@ static const struct vulkan_funcs vulkan_funcs =
     X11DRV_vkGetPhysicalDeviceWin32PresentationSupportKHR,
     X11DRV_vkGetSwapchainImagesKHR,
     X11DRV_vkQueuePresentKHR,
+    X11DRV_query_fs_hack,
 };
 
 static void *X11DRV_get_vk_device_proc_addr(const char *name)

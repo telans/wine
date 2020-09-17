@@ -23,7 +23,6 @@
 #include <stdarg.h>
 
 #define NONAMELESSUNION
-#define NONAMELESSSTRUCT
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
@@ -47,6 +46,7 @@ struct device
 {
     WCHAR *path;
     HANDLE file;
+    HANDLE handle;
     RID_DEVICE_INFO info;
     PHIDP_PREPARSED_DATA data;
 };
@@ -144,41 +144,63 @@ static struct device *add_device(HDEVINFO set, SP_DEVICE_INTERFACE_DATA *iface)
     device->path = path;
     device->file = file;
     device->info.cbSize = sizeof(RID_DEVICE_INFO);
+    device->handle = INVALID_HANDLE_VALUE;
 
     return device;
 }
 
-static void find_devices(void)
-{
-    static ULONGLONG last_check;
+extern DWORD WINAPI GetFinalPathNameByHandleW(HANDLE file, LPWSTR path, DWORD charcount, DWORD flags);
+static void find_devices(BOOL);
 
+HANDLE rawinput_handle_from_device_handle(HANDLE device, BOOL rescan)
+{
+    WCHAR buffer[sizeof(OBJECT_NAME_INFORMATION) + MAX_PATH + 1];
+    OBJECT_NAME_INFORMATION *info = (OBJECT_NAME_INFORMATION*)&buffer;
+    ULONG dummy;
+    unsigned int i;
+ 
+    for (i = 0; i < rawinput_devices_count; ++i)
+    {
+        if (rawinput_devices[i].handle == device)
+            return &rawinput_devices[i];
+    }
+
+    if (NtQueryObject( device, ObjectNameInformation, &buffer, sizeof(buffer) - sizeof(WCHAR), &dummy ) || !info->Name.Buffer)
+        return NULL;
+
+    /* replace \??\ with \\?\ to match rawinput_devices paths */
+    if (info->Name.Length > 1 && info->Name.Buffer[0] == '\\' && info->Name.Buffer[1] == '?')
+        info->Name.Buffer[1] = '\\';
+
+    for (i = 0; i < rawinput_devices_count; ++i)
+    {
+        if (strcmpW(rawinput_devices[i].path, info->Name.Buffer) == 0)
+        {
+            rawinput_devices[i].handle = device;
+            return &rawinput_devices[i];
+        }
+    }
+
+    if (!rescan)
+        return NULL;
+
+    find_devices(TRUE);
+
+    return rawinput_handle_from_device_handle(device, FALSE);
+}
+
+static void find_devices_by_guid(const GUID *guid)
+{
     SP_DEVICE_INTERFACE_DATA iface = { sizeof(iface) };
     struct device *device;
     HIDD_ATTRIBUTES attr;
     HIDP_CAPS caps;
-    GUID hid_guid;
     HDEVINFO set;
     DWORD idx;
 
-    if (GetTickCount64() - last_check < 2000)
-        return;
-    last_check = GetTickCount64();
+    set = SetupDiGetClassDevsW(guid, NULL, NULL, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
 
-    HidD_GetHidGuid(&hid_guid);
-
-    EnterCriticalSection(&rawinput_devices_cs);
-
-    /* destroy previous list */
-    for (idx = 0; idx < rawinput_devices_count; ++idx)
-    {
-        CloseHandle(rawinput_devices[idx].file);
-        heap_free(rawinput_devices[idx].path);
-    }
-    rawinput_devices_count = 0;
-
-    set = SetupDiGetClassDevsW(&hid_guid, NULL, NULL, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
-
-    for (idx = 0; SetupDiEnumDeviceInterfaces(set, NULL, &hid_guid, idx, &iface); ++idx)
+    for (idx = 0; SetupDiEnumDeviceInterfaces(set, NULL, guid, idx, &iface); ++idx)
     {
         if (!(device = add_device(set, &iface)))
             continue;
@@ -219,121 +241,47 @@ static void find_devices(void)
 
     SetupDiDestroyDeviceInfoList(set);
 
+}
+
+static void find_devices(BOOL force)
+{
+    static ULONGLONG last_check;
+
+    DWORD idx;
+    GUID hid_guid;
+
+    if (!force && GetTickCount64() - last_check < 2000)
+        return;
+
+    HidD_GetHidGuid(&hid_guid);
+
+    EnterCriticalSection(&rawinput_devices_cs);
+
+    if (!force && GetTickCount64() - last_check < 2000)
+    {
+        LeaveCriticalSection(&rawinput_devices_cs);
+        return;
+    }
+
+    last_check = GetTickCount64();
+
+    /* destroy previous list */
+    for (idx = 0; idx < rawinput_devices_count; ++idx)
+    {
+        CloseHandle(rawinput_devices[idx].file);
+        heap_free(rawinput_devices[idx].path);
+    }
+
+    rawinput_devices_count = 0;
+
+    find_devices_by_guid(&hid_guid);
+
+    /* HACK: also look up the xinput-specific devices */
+    hid_guid.Data4[7]++;
+    find_devices_by_guid(&hid_guid);
+
     LeaveCriticalSection(&rawinput_devices_cs);
 }
-
-
-RAWINPUT *rawinput_thread_data(void)
-{
-    struct user_thread_info *thread_info = get_user_thread_info();
-    RAWINPUT *rawinput = thread_info->rawinput;
-    if (!rawinput) rawinput = thread_info->rawinput = HeapAlloc( GetProcessHeap(), 0, RAWINPUT_BUFFER_SIZE );
-    return rawinput;
-}
-
-
-BOOL rawinput_from_hardware_message(RAWINPUT *rawinput, const struct hardware_msg_data *msg_data)
-{
-    rawinput->header.dwType = msg_data->rawinput.type;
-    if (msg_data->rawinput.type == RIM_TYPEMOUSE)
-    {
-        static const unsigned int button_flags[] =
-        {
-            0,                              /* MOUSEEVENTF_MOVE */
-            RI_MOUSE_LEFT_BUTTON_DOWN,      /* MOUSEEVENTF_LEFTDOWN */
-            RI_MOUSE_LEFT_BUTTON_UP,        /* MOUSEEVENTF_LEFTUP */
-            RI_MOUSE_RIGHT_BUTTON_DOWN,     /* MOUSEEVENTF_RIGHTDOWN */
-            RI_MOUSE_RIGHT_BUTTON_UP,       /* MOUSEEVENTF_RIGHTUP */
-            RI_MOUSE_MIDDLE_BUTTON_DOWN,    /* MOUSEEVENTF_MIDDLEDOWN */
-            RI_MOUSE_MIDDLE_BUTTON_UP,      /* MOUSEEVENTF_MIDDLEUP */
-        };
-        unsigned int i;
-
-        rawinput->header.dwSize  = FIELD_OFFSET(RAWINPUT, data) + sizeof(RAWMOUSE);
-        rawinput->header.hDevice = WINE_MOUSE_HANDLE;
-        rawinput->header.wParam  = 0;
-
-        rawinput->data.mouse.usFlags           = MOUSE_MOVE_RELATIVE;
-        rawinput->data.mouse.u.s.usButtonFlags = 0;
-        rawinput->data.mouse.u.s.usButtonData  = 0;
-        for (i = 1; i < ARRAY_SIZE(button_flags); ++i)
-        {
-            if (msg_data->flags & (1 << i))
-                rawinput->data.mouse.u.s.usButtonFlags |= button_flags[i];
-        }
-        if (msg_data->flags & MOUSEEVENTF_WHEEL)
-        {
-            rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_WHEEL;
-            rawinput->data.mouse.u.s.usButtonData   = msg_data->rawinput.mouse.data;
-        }
-        if (msg_data->flags & MOUSEEVENTF_HWHEEL)
-        {
-            rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_HORIZONTAL_WHEEL;
-            rawinput->data.mouse.u.s.usButtonData   = msg_data->rawinput.mouse.data;
-        }
-        if (msg_data->flags & MOUSEEVENTF_XDOWN)
-        {
-            if (msg_data->rawinput.mouse.data == XBUTTON1)
-                rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_BUTTON_4_DOWN;
-            else if (msg_data->rawinput.mouse.data == XBUTTON2)
-                rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_BUTTON_5_DOWN;
-        }
-        if (msg_data->flags & MOUSEEVENTF_XUP)
-        {
-            if (msg_data->rawinput.mouse.data == XBUTTON1)
-                rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_BUTTON_4_UP;
-            else if (msg_data->rawinput.mouse.data == XBUTTON2)
-                rawinput->data.mouse.u.s.usButtonFlags |= RI_MOUSE_BUTTON_5_UP;
-        }
-
-        rawinput->data.mouse.ulRawButtons       = 0;
-        rawinput->data.mouse.lLastX             = msg_data->rawinput.mouse.x;
-        rawinput->data.mouse.lLastY             = msg_data->rawinput.mouse.y;
-        rawinput->data.mouse.ulExtraInformation = msg_data->info;
-    }
-    else if (msg_data->rawinput.type == RIM_TYPEKEYBOARD)
-    {
-        rawinput->header.dwSize  = FIELD_OFFSET(RAWINPUT, data) + sizeof(RAWKEYBOARD);
-        rawinput->header.hDevice = WINE_KEYBOARD_HANDLE;
-        rawinput->header.wParam  = 0;
-
-        rawinput->data.keyboard.MakeCode = msg_data->rawinput.kbd.scan;
-        rawinput->data.keyboard.Flags    = msg_data->flags & KEYEVENTF_KEYUP ? RI_KEY_BREAK : RI_KEY_MAKE;
-        if (msg_data->flags & KEYEVENTF_EXTENDEDKEY) rawinput->data.keyboard.Flags |= RI_KEY_E0;
-        rawinput->data.keyboard.Reserved = 0;
-
-        switch (msg_data->rawinput.kbd.vkey)
-        {
-        case VK_LSHIFT:
-        case VK_RSHIFT:
-            rawinput->data.keyboard.VKey   = VK_SHIFT;
-            rawinput->data.keyboard.Flags &= ~RI_KEY_E0;
-            break;
-        case VK_LCONTROL:
-        case VK_RCONTROL:
-            rawinput->data.keyboard.VKey = VK_CONTROL;
-            break;
-        case VK_LMENU:
-        case VK_RMENU:
-            rawinput->data.keyboard.VKey = VK_MENU;
-            break;
-        default:
-            rawinput->data.keyboard.VKey = msg_data->rawinput.kbd.vkey;
-            break;
-        }
-
-        rawinput->data.keyboard.Message          = msg_data->rawinput.kbd.message;
-        rawinput->data.keyboard.ExtraInformation = msg_data->info;
-    }
-    else
-    {
-        FIXME("Unhandled rawinput type %#x.\n", msg_data->rawinput.type);
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
 
 /***********************************************************************
  *              GetRawInputDeviceList   (USER32.@)
@@ -356,7 +304,7 @@ UINT WINAPI GetRawInputDeviceList(RAWINPUTDEVICELIST *devices, UINT *device_coun
         return ~0U;
     }
 
-    find_devices();
+    find_devices(FALSE);
 
     if (!devices)
     {
@@ -459,7 +407,7 @@ UINT WINAPI GetRawInputData(HRAWINPUT rawinput, UINT command, void *data, UINT *
     TRACE("rawinput %p, command %#x, data %p, data_size %p, header_size %u.\n",
             rawinput, command, data, data_size, header_size);
 
-    if (!ri || !ri->header.dwSize)
+    if (!ri)
         return ~0U;
 
     if (header_size != sizeof(RAWINPUTHEADER))
@@ -488,7 +436,6 @@ UINT WINAPI GetRawInputData(HRAWINPUT rawinput, UINT command, void *data, UINT *
 
     if (*data_size < s) return ~0U;
     memcpy(data, ri, s);
-    ri->header.dwSize = 0;
     return s;
 }
 
@@ -560,6 +507,7 @@ UINT WINAPI GetRawInputDeviceInfoW(HANDLE handle, UINT command, void *data, UINT
             handle, command, data, data_size);
 
     if (!data_size) return ~0U;
+    if (!device) return ~0U;
 
     /* each case below must set:
      *     *data_size: length (meaning defined by command) of data we want to copy
@@ -645,14 +593,65 @@ UINT WINAPI GetRawInputDeviceInfoW(HANDLE handle, UINT command, void *data, UINT
     return *data_size;
 }
 
+static int compare_raw_input_devices(const void *ap, const void *bp)
+{
+    const RAWINPUTDEVICE a = *(const RAWINPUTDEVICE *)ap;
+    const RAWINPUTDEVICE b = *(const RAWINPUTDEVICE *)bp;
+
+    if (a.usUsagePage != b.usUsagePage) return a.usUsagePage - b.usUsagePage;
+    if (a.usUsage != b.usUsage) return a.usUsage - b.usUsage;
+    return 0;
+}
+
 /***********************************************************************
  *              GetRegisteredRawInputDevices   (USER32.@)
  */
 UINT WINAPI DECLSPEC_HOTPATCH GetRegisteredRawInputDevices(RAWINPUTDEVICE *devices, UINT *device_count, UINT size)
 {
-    FIXME("devices %p, device_count %p, size %u stub!\n", devices, device_count, size);
+    struct rawinput_device *d = NULL;
+    unsigned int count = ~0U;
 
-    return 0;
+    TRACE("devices %p, device_count %p, size %u\n", devices, device_count, size);
+
+    if (!device_count)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return ~0U;
+    }
+
+    if (devices && !(d = HeapAlloc( GetProcessHeap(), 0, *device_count * sizeof(*d) )))
+        return ~0U;
+
+    SERVER_START_REQ( get_rawinput_devices )
+    {
+        if (d)
+            wine_server_set_reply( req, d, *device_count * sizeof(*d) );
+
+        if (wine_server_call( req ))
+            goto done;
+
+        if (!d || reply->device_count > *device_count)
+        {
+            *device_count = reply->device_count;
+            SetLastError( ERROR_INSUFFICIENT_BUFFER );
+            goto done;
+        }
+
+        for (count = 0; count < reply->device_count; ++count)
+        {
+            devices[count].usUsagePage = d[count].usage_page;
+            devices[count].usUsage = d[count].usage;
+            devices[count].dwFlags = d[count].flags;
+            devices[count].hwndTarget = wine_server_ptr_handle(d[count].target);
+        }
+    }
+    SERVER_END_REQ;
+
+    qsort(devices, count, sizeof(*devices), compare_raw_input_devices);
+
+done:
+    if (d) HeapFree( GetProcessHeap(), 0, d );
+    return count;
 }
 
 
