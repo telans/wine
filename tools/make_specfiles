@@ -177,6 +177,7 @@ my @dll_groups =
  [
   "netapi32",
   "ext-ms-win-domainjoin-netjoin-l1-1-0",
+  "srvcli",
  ],
  [
   "ntdll",
@@ -489,6 +490,7 @@ my @dll_groups =
  [
   "ntoskrnl.exe",
   "hal",
+  "win32k.sys",
  ],
  [
   "mscoree",
