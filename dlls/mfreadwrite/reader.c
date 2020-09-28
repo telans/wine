@@ -491,6 +491,8 @@ static HRESULT WINAPI source_reader_source_events_callback_Invoke(IMFAsyncCallba
 
     TRACE("%p, %p.\n", iface, result);
 
+    return E_NOTIMPL;
+
     source = (IMFMediaSource *)IMFAsyncResult_GetStateNoAddRef(result);
 
     if (FAILED(hr = IMFMediaSource_EndGetEvent(source, result, &event)))
@@ -777,6 +779,8 @@ static HRESULT WINAPI source_reader_stream_events_callback_Invoke(IMFAsyncCallba
     HRESULT hr;
 
     TRACE("%p, %p.\n", iface, result);
+
+    return E_NOTIMPL;
 
     stream = (IMFMediaStream *)IMFAsyncResult_GetStateNoAddRef(result);
 
@@ -1325,6 +1329,8 @@ static HRESULT WINAPI src_reader_GetStreamSelection(IMFSourceReader *iface, DWOR
 
     TRACE("%p, %#x, %p.\n", iface, index, selected);
 
+    return E_NOTIMPL;
+
     switch (index)
     {
         case MF_SOURCE_READER_FIRST_VIDEO_STREAM:
@@ -1414,6 +1420,8 @@ static HRESULT source_reader_get_native_media_type(struct source_reader *reader,
     BOOL selected;
     HRESULT hr;
 
+    return E_NOTIMPL;
+
     switch (index)
     {
         case MF_SOURCE_READER_FIRST_VIDEO_STREAM:
@@ -1466,6 +1474,8 @@ static HRESULT WINAPI src_reader_GetCurrentMediaType(IMFSourceReader *iface, DWO
     HRESULT hr;
 
     TRACE("%p, %#x, %p.\n", iface, index, type);
+
+    return E_NOTIMPL;
 
     switch (index)
     {
@@ -1690,6 +1700,8 @@ static HRESULT WINAPI src_reader_SetCurrentMediaType(IMFSourceReader *iface, DWO
 
     TRACE("%p, %#x, %p, %p.\n", iface, index, reserved, type);
 
+    return E_NOTIMPL;
+
     switch (index)
     {
         case MF_SOURCE_READER_FIRST_VIDEO_STREAM:
@@ -1725,6 +1737,8 @@ static HRESULT WINAPI src_reader_SetCurrentPosition(IMFSourceReader *iface, REFG
     HRESULT hr;
 
     TRACE("%p, %s, %p.\n", iface, debugstr_guid(format), position);
+
+    return E_NOTIMPL;
 
     if (FAILED(hr = IMFMediaSource_GetCharacteristics(reader->source, &flags)))
         return hr;
@@ -1892,6 +1906,8 @@ static HRESULT source_reader_flush_async(struct source_reader *reader, unsigned 
     if (reader->flags & SOURCE_READER_FLUSHING)
         return MF_E_INVALIDREQUEST;
 
+    return E_NOTIMPL;
+
     switch (index)
     {
         case MF_SOURCE_READER_FIRST_VIDEO_STREAM:
@@ -1948,6 +1964,8 @@ static HRESULT WINAPI src_reader_GetServiceForStream(IMFSourceReader *iface, DWO
 
     TRACE("%p, %#x, %s, %s, %p\n", iface, index, debugstr_guid(service), debugstr_guid(riid), object);
 
+    return E_NOTIMPL;
+
     switch (index)
     {
         case MF_SOURCE_READER_MEDIASOURCE:
@@ -1986,6 +2004,8 @@ static HRESULT WINAPI src_reader_GetPresentationAttribute(IMFSourceReader *iface
     HRESULT hr;
 
     TRACE("%p, %#x, %s, %p.\n", iface, index, debugstr_guid(guid), value);
+
+    return E_NOTIMPL;
 
     switch (index)
     {
@@ -2391,9 +2411,26 @@ static HRESULT create_source_reader_from_object(IUnknown *unk, IMFAttributes *at
 HRESULT WINAPI MFCreateSourceReaderFromByteStream(IMFByteStream *stream, IMFAttributes *attributes,
         IMFSourceReader **reader)
 {
+    struct source_reader *object;
+
     TRACE("%p, %p, %p.\n", stream, attributes, reader);
 
-    return create_source_reader_from_object((IUnknown *)stream, attributes, &IID_IMFSourceReader, (void **)reader);
+    object = heap_alloc_zero(sizeof(*object));
+    if (!object)
+        return E_OUTOFMEMORY;
+
+    object->IMFSourceReader_iface.lpVtbl = &srcreader_vtbl;
+    object->source_events_callback.lpVtbl = &source_events_callback_vtbl;
+    object->stream_events_callback.lpVtbl = &stream_events_callback_vtbl;
+    object->refcount = 1;
+
+    InitializeCriticalSection(&object->cs);
+
+    *reader = &object->IMFSourceReader_iface;
+
+    return S_OK;
+
+//    return create_source_reader_from_object((IUnknown *)stream, attributes, &IID_IMFSourceReader, (void **)reader);
 }
 
 /***********************************************************************

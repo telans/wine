@@ -101,7 +101,6 @@ UNSUPPORTED_EXTENSIONS = [
     # Device extensions
     "VK_AMD_display_native_hdr",
     "VK_EXT_display_control", # Requires VK_EXT_display_surface_counter
-    "VK_EXT_full_screen_exclusive",
     "VK_EXT_hdr_metadata", # Needs WSI work.
     "VK_EXT_pipeline_creation_feedback",
     "VK_GOOGLE_display_timing",
@@ -133,6 +132,11 @@ CORE_EXTENSIONS = [
     "VK_KHR_surface",
     "VK_KHR_swapchain",
     "VK_KHR_win32_surface",
+    "VK_KHR_get_surface_capabilities2",
+]
+
+FAKED_EXTENSIONS = [
+    {"name": "VK_EXT_full_screen_exclusive", "version": 4}
 ]
 
 # Functions part of our winevulkan graphics driver interface.
@@ -185,7 +189,7 @@ FUNCTION_OVERRIDES = {
     "vkGetPhysicalDeviceSurfaceSupportKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
     "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" : {"dispatch" : True, "driver" : True, "thunk" : False, "private_thunk" : True},
     "vkGetPhysicalDeviceSurfaceFormatsKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
-    "vkGetPhysicalDeviceSurfacePresentModesKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
+    "vkGetPhysicalDeviceSurfacePresentModesKHR" : {"dispatch" : True, "driver" : True, "thunk" : True, "private_thunk" : True},
 
     # VK_KHR_get_surface_capabilities2
     "vkGetPhysicalDeviceSurfaceCapabilities2KHR" : {"dispatch" : True, "driver" : True, "thunk" : False, "private_thunk" : True},
@@ -196,10 +200,11 @@ FUNCTION_OVERRIDES = {
     "vkGetPhysicalDeviceWin32PresentationSupportKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
 
     # VK_KHR_swapchain
-    "vkCreateSwapchainKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
-    "vkDestroySwapchainKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
-    "vkGetSwapchainImagesKHR": {"dispatch" : True, "driver" : True, "thunk" : True},
-    "vkQueuePresentKHR": {"dispatch" : True, "driver" : True, "thunk" : True},
+    "vkAcquireNextImageKHR": {"dispatch" : True, "driver" : False, "thunk" : False},
+    "vkCreateSwapchainKHR" : {"dispatch" : True, "driver" : True, "thunk" : False},
+    "vkDestroySwapchainKHR" : {"dispatch" : True, "driver" : True, "thunk" : False},
+    "vkGetSwapchainImagesKHR": {"dispatch" : True, "driver" : True, "thunk" : False},
+    "vkQueuePresentKHR": {"dispatch" : True, "driver" : True, "thunk" : False},
 
     # VK_KHR_external_fence_capabilities
     "vkGetPhysicalDeviceExternalFencePropertiesKHR" : {"dispatch" : False, "driver" : False, "thunk" : False},
@@ -215,8 +220,18 @@ FUNCTION_OVERRIDES = {
     "vkEnumeratePhysicalDeviceGroupsKHR" : {"dispatch" : True, "driver" : False, "thunk" : False},
 
     # VK_KHR_device_group
-    "vkGetDeviceGroupSurfacePresentModesKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
+    "vkGetDeviceGroupSurfacePresentModesKHR" : {"dispatch" : True, "driver" : True, "thunk" : True, "private_thunk": True},
     "vkGetPhysicalDevicePresentRectanglesKHR" : {"dispatch" : True, "driver" : True, "thunk" : True},
+
+    # VK_KHR_get_surface_capabilities2
+    #"vkGetPhysicalDeviceSurfaceCapabilities2KHR" : {"dispatch" : True, "driver" : True, "thunk" : False, "private_thunk" : True},
+    #"vkGetPhysicalDeviceSurfaceFormats2KHR" : {"dispatch" : True, "driver" : True, "thunk" : False, "private_thunk" : True},
+
+    # VK_EXT_full_screen_exclusive
+    "vkGetPhysicalDeviceSurfacePresentModes2EXT" : {"dispatch" : True, "driver" : False, "thunk" : False},
+    "vkGetDeviceGroupSurfacePresentModes2EXT" : {"dispatch" : True, "driver" : False, "thunk" : False},
+    "vkAcquireFullScreenExclusiveModeEXT" : {"dispatch" : True, "driver" : False, "thunk" : False},
+    "vkReleaseFullScreenExclusiveModeEXT" : {"dispatch" : True, "driver" : False, "thunk" : False},
 
     # VK_EXT_private_data
     "vkGetPrivateDataEXT" : {"dispatch": True, "driver" : False, "thunk" : False},
@@ -232,6 +247,7 @@ STRUCT_CHAIN_CONVERSIONS = [
     "VkInstanceCreateInfo",
 ]
 
+shared_conversion_structs = ["VkBufferMemoryBarrier", "VkImageMemoryBarrier"]
 
 class Direction(Enum):
     """ Parameter direction: input, output, input_output. """
@@ -1136,14 +1152,14 @@ class VkMember(object):
         struct = self.type_info["data"]
         direction = Direction.OUTPUT if struct.returnedonly else Direction.INPUT
         if self.is_dynamic_array():
-            conversions.append(ConversionFunction(False, True, direction, struct))
+            conversions.append(ConversionFunction(False, True, struct.name in shared_conversion_structs, direction, struct))
         elif self.is_static_array():
-            conversions.append(ConversionFunction(True, False, direction, struct))
+            conversions.append(ConversionFunction(True, False, struct.name in shared_conversion_structs, direction, struct))
         else:
-            conversions.append(ConversionFunction(False, False, direction, struct))
+            conversions.append(ConversionFunction(False, False, struct.name in shared_conversion_structs, direction, struct))
 
         if self.needs_free():
-            conversions.append(FreeFunction(self.is_dynamic_array(), struct))
+            conversions.append(FreeFunction(self.is_dynamic_array(), struct.name in shared_conversion_structs, struct))
 
         return conversions
 
@@ -1300,16 +1316,16 @@ class VkParam(object):
 
         # Input functions require win to host conversion.
         if self._direction in [Direction.INPUT, Direction.INPUT_OUTPUT]:
-            self.input_conv = ConversionFunction(False, self.is_dynamic_array(), Direction.INPUT, self.struct)
+            self.input_conv = ConversionFunction(False, self.is_dynamic_array(), self.struct.name in shared_conversion_structs, Direction.INPUT, self.struct)
 
         # Output functions require host to win conversion.
         if self._direction in [Direction.INPUT_OUTPUT, Direction.OUTPUT]:
-            self.output_conv = ConversionFunction(False, self.is_dynamic_array(), Direction.OUTPUT, self.struct)
+            self.output_conv = ConversionFunction(False, self.is_dynamic_array(), self.struct.name in shared_conversion_structs, Direction.OUTPUT, self.struct)
 
         # Dynamic arrays, but also some normal structs (e.g. VkCommandBufferBeginInfo) need memory
         # allocation and thus some cleanup.
         if self.is_dynamic_array() or self.struct.needs_free():
-            self.free_func = FreeFunction(self.is_dynamic_array(), self.struct)
+            self.free_func = FreeFunction(self.is_dynamic_array(), self.struct.name in shared_conversion_structs, self.struct)
 
     def _set_direction(self):
         """ Internal helper function to set parameter direction (input/output/input_output). """
@@ -1426,6 +1442,9 @@ class VkParam(object):
         """
 
         return self._direction
+
+    def format_string(self):
+        return self.format_str
 
     def dispatch_table(self):
         """ Return functions dispatch table pointer for dispatchable objects. """
@@ -1802,9 +1821,10 @@ class VkStruct(Sequence):
 
 
 class ConversionFunction(object):
-    def __init__(self, array, dyn_array, direction, struct):
+    def __init__(self, array, dyn_array, shared, direction, struct):
         self.array = array
         self.direction = direction
+        self.shared = shared
         self.dyn_array = dyn_array
         self.struct = struct
         self.type = struct.name
@@ -1825,7 +1845,11 @@ class ConversionFunction(object):
             return_type = "{0}_host".format(self.type)
 
         # Generate function prototype.
-        body = "static inline {0} *{1}(".format(return_type, self.name)
+        if self.shared:
+            body = ""
+        else:
+            body = "static inline "
+        body += "{0} *{1}(".format(return_type, self.name)
         body += ", ".join(p for p in params)
         body += ")\n{\n"
 
@@ -1856,7 +1880,11 @@ class ConversionFunction(object):
         else:
             params = ["const {0} *in".format(self.type), "{0}_host *out".format(self.type)]
 
-        body = "static inline void {0}(".format(self.name)
+        if self.shared:
+            body = ""
+        else:
+            body = "static inline "
+        body += "void {0}(".format(self.name)
 
         # Generate parameter list
         body += ", ".join(p for p in params)
@@ -1885,11 +1913,17 @@ class ConversionFunction(object):
 
         if self.direction == Direction.OUTPUT:
             params = ["const {0}_host *in".format(self.type), "{0} *out".format(self.type), "uint32_t count"]
+            return_type = self.type
         else:
             params = ["const {0} *in".format(self.type), "{0} *out_host".format(self.type), "uint32_t count"]
+            return_type = "{0}_host".format(self.type)
 
         # Generate function prototype.
-        body = "static inline void {0}(".format(self.name)
+        if self.shared:
+            body = ""
+        else:
+            body = "static inline "
+        body += "void {0}(".format(self.name)
         body += ", ".join(p for p in params)
         body += ")\n{\n"
         body += "    unsigned int i;\n\n"
@@ -1931,10 +1965,46 @@ class ConversionFunction(object):
         else:
             return self._generate_conversion_func()
 
+    def prototype(self):
+        if self.array:
+            if self.direction == Direction.OUTPUT:
+                params = ["const {0}_host *in".format(self.type), "{0} *out".format(self.type), "uint32_t count"]
+                return_type = self.type
+            else:
+                params = ["const {0} *in".format(self.type), "{0} *out_host".format(self.type), "uint32_t count"]
+                return_type = "{0}_host".format(self.type)
+
+            body = "void {0}(".format(self.name)
+            body += ", ".join(p for p in params)
+            body += ");\n"
+        elif self.dyn_array:
+            if self.direction == Direction.OUTPUT:
+                params = ["const {0}_host *in".format(self.type), "uint32_t count"]
+                return_type = self.type
+            else:
+                params = ["const {0} *in".format(self.type), "uint32_t count"]
+                return_type = "{0}_host".format(self.type)
+
+            body = "{0} *{1}(".format(return_type, self.name)
+            body += ", ".join(p for p in params)
+            body += ");\n"
+        else:
+            if self.direction == Direction.OUTPUT:
+                params = ["const {0}_host *in".format(self.type), "{0} *out".format(self.type)]
+            else:
+                params = ["const {0} *in".format(self.type), "{0}_host *out".format(self.type)]
+
+            body = "void {0}(".format(self.name)
+            body += ", ".join(p for p in params)
+            body += ");\n"
+
+        return body
+
 
 class FreeFunction(object):
-    def __init__(self, dyn_array, struct):
+    def __init__(self, dyn_array, shared, struct):
         self.dyn_array = dyn_array
+        self.shared = shared
         self.struct = struct
         self.type = struct.name
 
@@ -1950,7 +2020,11 @@ class FreeFunction(object):
         """ Helper function for cleaning up temporary buffers required for array conversions. """
 
         # Generate function prototype.
-        body = "static inline void {0}({1}_host *in, uint32_t count)\n{{\n".format(self.name, self.type)
+        if self.shared:
+            body = ""
+        else:
+            body = "static inline "
+        body += "void {0}({1}_host *in, uint32_t count)\n{{\n".format(self.name, self.type)
 
         # E.g. VkGraphicsPipelineCreateInfo_host needs freeing for pStages.
         if self.struct.needs_free():
@@ -1983,7 +2057,11 @@ class FreeFunction(object):
             return ""
 
         # Generate function prototype.
-        body = "static inline void {0}({1}_host *in)\n{{\n".format(self.name, self.type)
+        if self.shared:
+            body = ""
+        else:
+            body = "static inline "
+        body += "void {0}({1}_host *in)\n{{\n".format(self.name, self.type)
 
         for m in self.struct:
             if m.needs_conversion() and m.is_dynamic_array():
@@ -2004,6 +2082,11 @@ class FreeFunction(object):
             # Some structures need freeing too if they contain dynamic arrays.
             # E.g. VkCommandBufferBeginInfo
             return self._generate_free_func()
+
+    def prototype(self):
+        if self.dyn_array:
+            return "void {0}({1}_host *in, uint32_t count);\n".format(self.name, self.type)
+        return "void {0}({1}_host *in);\n".format(self.name, self.type)
 
 
 class StructChainConversionFunction(object):
@@ -2167,8 +2250,13 @@ class VkGenerator(object):
         # Generate any conversion helper functions.
         f.write("#if defined(USE_STRUCT_CONVERSION)\n")
         for conv in self.conversions:
-            f.write(conv.definition())
+            if not conv.shared:
+                f.write(conv.definition())
         f.write("#endif /* USE_STRUCT_CONVERSION */\n\n")
+
+        for conv in self.conversions:
+            if conv.shared:
+                f.write(conv.definition())
 
         for conv in self.struct_chain_conversions:
             f.write(conv.definition())
@@ -2247,6 +2335,12 @@ class VkGenerator(object):
             f.write("    \"{0}\",\n".format(ext["name"]))
         f.write("};\n\n")
 
+        # Create array of faked device extensions.
+        f.write("static const VkExtensionProperties vk_device_extension_discards[] =\n{\n")
+        for ext in FAKED_EXTENSIONS:
+            f.write("    {{\"{0}\", {1}}},\n".format(ext["name"], ext["version"]))
+        f.write("};\n\n")
+
         # Create array of instance extensions.
         f.write("static const char * const vk_instance_extensions[] =\n{\n")
         for ext in self.registry.extensions:
@@ -2265,6 +2359,27 @@ class VkGenerator(object):
         f.write("            return TRUE;\n")
         f.write("    }\n")
         f.write("    return FALSE;\n")
+        f.write("}\n\n")
+
+        f.write("BOOL wine_vk_device_extension_faked(const char *name)\n")
+        f.write("{\n")
+        f.write("    unsigned int i;\n")
+        f.write("    for (i = 0; i < ARRAY_SIZE(vk_device_extension_discards); i++)\n")
+        f.write("    {\n")
+        f.write("        if (strcmp(vk_device_extension_discards[i].extensionName, name) == 0)\n")
+        f.write("            return TRUE;\n")
+        f.write("    }\n")
+        f.write("    return FALSE;\n")
+        f.write("}\n\n")
+
+        f.write("unsigned int wine_vk_device_extension_faked_count(void)\n")
+        f.write("{\n")
+        f.write("    return ARRAY_SIZE(vk_device_extension_discards);\n")
+        f.write("}\n\n")
+
+        f.write("const VkExtensionProperties* wine_vk_device_extension_faked_idx(unsigned int idx)\n")
+        f.write("{\n")
+        f.write("    return &vk_device_extension_discards[idx];\n")
         f.write("}\n\n")
 
         f.write("BOOL wine_vk_instance_extension_supported(const char *name)\n")
@@ -2313,6 +2428,10 @@ class VkGenerator(object):
         for func in self.struct_chain_conversions:
             f.write(func.prototype(postfix="DECLSPEC_HIDDEN") + ";\n")
         f.write("\n")
+
+        for conv in self.conversions:
+            if conv.shared:
+                f.write(conv.prototype())
 
         f.write("/* For use by vkDevice and children */\n")
         f.write("struct vulkan_device_funcs\n{\n")
@@ -2507,6 +2626,14 @@ class VkGenerator(object):
             # stuff in there. For simplicity substitute with "void *".
             pfn = pfn.replace("PFN_vkVoidFunction", "void *")
             f.write("    {0};\n".format(pfn))
+
+        f.write("\n    /* Optional. Returns TRUE if FS hack is active, otherwise returns FALSE. If\n")
+        f.write("     * it returns TRUE, then real_sz will contain the actual display\n")
+        f.write("     * resolution; user_sz will contain the app's requested mode; and dst_blit\n")
+        f.write("     * will contain the area to blit the user image to in real coordinates.\n")
+        f.write("     * All parameters are optional. */\n")
+        f.write("    VkBool32 (*query_fs_hack)(VkExtent2D *real_sz, VkExtent2D *user_sz, VkRect2D *dst_blit, VkFilter *filter);\n")
+
         f.write("};\n\n")
 
         f.write("extern const struct vulkan_funcs * CDECL __wine_get_vulkan_driver(HDC hdc, UINT version);\n\n")
@@ -2547,6 +2674,11 @@ class VkGenerator(object):
         f.write("@ stdcall -private vk_icdGetInstanceProcAddr(ptr str) wine_vk_icdGetInstanceProcAddr\n")
         f.write("@ stdcall -private vk_icdNegotiateLoaderICDInterfaceVersion(ptr) wine_vk_icdNegotiateLoaderICDInterfaceVersion\n")
         f.write("@ cdecl -norelay native_vkGetInstanceProcAddrWINE(ptr str)\n")
+        f.write("@ stdcall __wine_get_native_VkDevice(ptr)\n")
+        f.write("@ stdcall __wine_get_native_VkInstance(ptr)\n")
+        f.write("@ stdcall __wine_get_native_VkPhysicalDevice(ptr)\n")
+        f.write("@ stdcall __wine_get_wrapped_VkPhysicalDevice(ptr)\n")
+        f.write("@ stdcall __wine_get_native_VkQueue(ptr)\n")
 
         # Export symbols for all Vulkan Core functions.
         for func in self.registry.funcs.values():
