@@ -2574,6 +2574,42 @@ struct next_thread_reply
 };
 
 
+struct thread_info
+{
+    thread_id_t     tid;
+    int             base_priority;
+    int             current_priority;
+    int             unix_tid;
+};
+
+struct process_info
+{
+    data_size_t     name_len;
+    int             thread_count;
+    int             priority;
+    process_id_t    pid;
+    process_id_t    parent_pid;
+    int             handle_count;
+    int             unix_pid;
+
+
+};
+
+
+struct list_processes_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct list_processes_reply
+{
+    struct reply_header __header;
+    data_size_t     info_size;
+    int             process_count;
+    /* VARARG(data,process_info,info_size); */
+};
+
+
 
 struct wait_debug_event_request
 {
@@ -5949,6 +5985,20 @@ struct set_job_completion_port_reply
 
 
 
+struct get_job_info_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_job_info_reply
+{
+    struct reply_header __header;
+    int total_processes;
+    int active_processes;
+};
+
+
+
 struct terminate_job_request
 {
     struct request_header __header;
@@ -6188,6 +6238,7 @@ enum request
     REQ_create_snapshot,
     REQ_next_process,
     REQ_next_thread,
+    REQ_list_processes,
     REQ_wait_debug_event,
     REQ_queue_exception_event,
     REQ_get_exception_status,
@@ -6393,6 +6444,7 @@ enum request
     REQ_process_in_job,
     REQ_set_job_limits,
     REQ_set_job_completion_port,
+    REQ_get_job_info,
     REQ_terminate_job,
     REQ_suspend_process,
     REQ_resume_process,
@@ -6508,6 +6560,7 @@ union generic_request
     struct create_snapshot_request create_snapshot_request;
     struct next_process_request next_process_request;
     struct next_thread_request next_thread_request;
+    struct list_processes_request list_processes_request;
     struct wait_debug_event_request wait_debug_event_request;
     struct queue_exception_event_request queue_exception_event_request;
     struct get_exception_status_request get_exception_status_request;
@@ -6713,6 +6766,7 @@ union generic_request
     struct process_in_job_request process_in_job_request;
     struct set_job_limits_request set_job_limits_request;
     struct set_job_completion_port_request set_job_completion_port_request;
+    struct get_job_info_request get_job_info_request;
     struct terminate_job_request terminate_job_request;
     struct suspend_process_request suspend_process_request;
     struct resume_process_request resume_process_request;
@@ -6826,6 +6880,7 @@ union generic_reply
     struct create_snapshot_reply create_snapshot_reply;
     struct next_process_reply next_process_reply;
     struct next_thread_reply next_thread_reply;
+    struct list_processes_reply list_processes_reply;
     struct wait_debug_event_reply wait_debug_event_reply;
     struct queue_exception_event_reply queue_exception_event_reply;
     struct get_exception_status_reply get_exception_status_reply;
@@ -7031,6 +7086,7 @@ union generic_reply
     struct process_in_job_reply process_in_job_reply;
     struct set_job_limits_reply set_job_limits_reply;
     struct set_job_completion_port_reply set_job_completion_port_reply;
+    struct get_job_info_reply get_job_info_reply;
     struct terminate_job_reply terminate_job_reply;
     struct suspend_process_reply suspend_process_reply;
     struct resume_process_reply resume_process_reply;
