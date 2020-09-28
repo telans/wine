@@ -2910,6 +2910,22 @@ WINBASEAPI UINT        WINAPI _lwrite(HFILE,LPCSTR,UINT);
 extern char * CDECL wine_get_unix_file_name( LPCWSTR dos );
 extern WCHAR * CDECL wine_get_dos_file_name( LPCSTR str );
 
+#include "pshpack1.h"
+
+struct local_header
+{
+   WORD  magic;
+   void *ptr;
+   BYTE flags;
+   BYTE lock;
+   struct local_header *next;
+};
+
+#include "poppack.h"
+
+extern struct local_header *wine_hlocal_hashtable_find_unlocked(const void *ptr);
+
+
 
 /* Interlocked functions */
 

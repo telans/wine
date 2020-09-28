@@ -521,25 +521,101 @@ BOOL WINAPI DECLSPEC_HOTPATCH HeapWalk( HANDLE heap, PROCESS_HEAP_ENTRY *entry )
  * Global/local heap functions
  ***********************************************************************/
 
-#include "pshpack1.h"
-
-struct local_header
-{
-   WORD  magic;
-   void *ptr;
-   BYTE flags;
-   BYTE lock;
-};
-
-#include "poppack.h"
-
 #define MAGIC_LOCAL_USED    0x5342
-/* align the storage needed for the HLOCAL on an 8-byte boundary thus
- * LocalAlloc/LocalReAlloc'ing with LMEM_MOVEABLE of memory with
- * size = 8*k, where k=1,2,3,... allocs exactly the given size.
- * The Minolta DiMAGE Image Viewer heavily relies on this, corrupting
- * the output jpeg's > 1 MB if not */
-#define HLOCAL_STORAGE      (sizeof(HLOCAL) * 2)
+
+/* G/LMEM_MOVEABLE behaviour:
+ *
+ * Win9x: heap block is allocated on 8 byte boundary, but first 4 bytes
+ *        are used to store pointer back to struct local_header's ptr,
+ *        so the pointer returned from GlobalLock()/LocalLock()
+ *        is NEVER aligned to 8 bytes, only to 4 bytes.
+ *
+ * WinNT: heap block is allocated on 8 byte boundary, no pointer back
+ *        to struct local_header, so GlobalLock()/LocalLock()
+ *        ALWAYS return the pointer from HeapAlloc(), which is aligned
+ *        to 8 bytes.
+ *
+ * This affects applications in several ways:
+ * 1. Some applications break when alignment isn't 8 bytes
+ *    (eg. Minolta DiMAGE Image Viewer), but that means they will
+ *    also break on Win9x.
+ * 2. wxWidgets drag-and-drop with custom formats will crash if
+ *    the pointer returned from GlobalLock() can't be passed to
+ *    HeapSize(), because it expects the Windows NT layout.
+ */
+
+#define HLOCAL_STORAGE      (sizeof(HLOCAL))
+
+#define HLOCAL_HASHTABLE_SIZE 8192
+#define HLOCAL_HASH(ptr) (((ULONG_PTR)ptr >> 3) & 0x1FFF)
+static struct local_header *hlocal_hashtable[HLOCAL_HASHTABLE_SIZE];
+
+static inline BOOL is_win9x(void)
+{
+    return GetVersion() & 0x80000000;
+}
+
+static void hlocal_hashtable_add_unlocked(struct local_header *header)
+{
+    ULONG_PTR hashcode;
+
+    hashcode = HLOCAL_HASH(header->ptr);
+    header->next = hlocal_hashtable[hashcode];
+    hlocal_hashtable[hashcode] = header;
+}
+
+static void hlocal_hashtable_add(struct local_header *header)
+{
+    RtlLockHeap( GetProcessHeap() );
+    hlocal_hashtable_add_unlocked( header );
+    RtlUnlockHeap( GetProcessHeap() );
+}
+
+struct local_header *wine_hlocal_hashtable_find_unlocked(const void *ptr)
+{
+    ULONG_PTR hashcode;
+    struct local_header *next;
+
+    hashcode = HLOCAL_HASH(ptr);
+    for (next = hlocal_hashtable[hashcode]; next; next = next->next)
+    {
+         if (next->ptr == ptr)
+             break;
+    }
+
+    return next;
+}
+
+static struct local_header *hlocal_hashtable_find(void *ptr)
+{
+    struct local_header *ret;
+
+    RtlLockHeap( GetProcessHeap() );
+
+    ret = wine_hlocal_hashtable_find_unlocked( ptr );
+
+    RtlUnlockHeap( GetProcessHeap() );
+
+    return ret;
+}
+
+static void hlocal_hashtable_remove_unlocked(struct local_header *header)
+{
+    ULONG_PTR hashcode;
+    struct local_header **prev;
+
+    hashcode = HLOCAL_HASH(header->ptr);
+    prev = &hlocal_hashtable[hashcode];
+    while (*prev)
+    {
+        if (*prev == header)
+        {
+            *prev = header->next;
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+}
 
 static inline struct local_header *get_header( HLOCAL hmem )
 {
@@ -611,13 +687,24 @@ HLOCAL WINAPI DECLSPEC_HOTPATCH LocalAlloc( UINT flags, SIZE_T size )
 
     if (size)
     {
-        if (!(ptr = HeapAlloc(GetProcessHeap(), heap_flags, size + HLOCAL_STORAGE )))
+        SIZE_T alloc_size = size;
+        if (is_win9x())
+            alloc_size += HLOCAL_STORAGE;
+        if (!(ptr = HeapAlloc(GetProcessHeap(), heap_flags, alloc_size )))
         {
             HeapFree( GetProcessHeap(), 0, header );
             return 0;
         }
-        *(HLOCAL *)ptr = get_handle( header );
-        header->ptr = (char *)ptr + HLOCAL_STORAGE;
+        if (is_win9x())
+        {
+            *(HLOCAL *)ptr = get_handle( header );
+            header->ptr = (char *)ptr + HLOCAL_STORAGE;
+        }
+        else
+        {
+            header->ptr = ptr;
+            hlocal_hashtable_add(header);
+        }
     }
     else header->ptr = NULL;
 
@@ -655,8 +742,13 @@ HLOCAL WINAPI DECLSPEC_HOTPATCH LocalFree( HLOCAL hmem )
                 header->magic = 0xdead;
                 if (header->ptr)
                 {
+                    char *ptr = header->ptr;
+                    if (is_win9x())
+                        ptr -= HLOCAL_STORAGE;
+                    else
+                        hlocal_hashtable_remove_unlocked(header);
                     if (!HeapFree( GetProcessHeap(), HEAP_NO_SERIALIZE,
-                                   (char *)header->ptr - HLOCAL_STORAGE ))
+                                   ptr ))
                         ret = hmem;
                 }
                 if (!HeapFree( GetProcessHeap(), HEAP_NO_SERIALIZE, header )) ret = hmem;
@@ -790,21 +882,47 @@ HLOCAL WINAPI DECLSPEC_HOTPATCH LocalReAlloc( HLOCAL hmem, SIZE_T size, UINT fla
               {
                   if (header->ptr)
                   {
-                      if ((ptr = HeapReAlloc( GetProcessHeap(), heap_flags,
-                                              (char *)header->ptr - HLOCAL_STORAGE,
-                                              size + HLOCAL_STORAGE )))
+                      if (is_win9x())
                       {
-                          header->ptr = (char *)ptr + HLOCAL_STORAGE;
-                          ret = hmem;
+                          if ((ptr = HeapReAlloc( GetProcessHeap(), heap_flags,
+                                                  (char *)header->ptr - HLOCAL_STORAGE,
+                                                  size + HLOCAL_STORAGE )))
+                          {
+                              header->ptr = (char *)ptr + HLOCAL_STORAGE;
+                              ret = hmem;
+                          }
+                      }
+                      else
+                      {
+                          if ((ptr = HeapReAlloc( GetProcessHeap(), heap_flags,
+                                                  header->ptr, size + HLOCAL_STORAGE )))
+                          {
+                              hlocal_hashtable_remove_unlocked( header );
+                              header->ptr = ptr;
+                              hlocal_hashtable_add_unlocked( header );
+                              ret = hmem;
+                          }
                       }
                   }
                   else
                   {
-                      if ((ptr = HeapAlloc( GetProcessHeap(), heap_flags, size + HLOCAL_STORAGE )))
+                      if (is_win9x())
                       {
-                          *(HLOCAL *)ptr = hmem;
-                          header->ptr = (char *)ptr + HLOCAL_STORAGE;
-                          ret = hmem;
+                          if ((ptr = HeapAlloc( GetProcessHeap(), heap_flags, size + HLOCAL_STORAGE )))
+                          {
+                              *(HLOCAL *)ptr = hmem;
+                              header->ptr = (char *)ptr + HLOCAL_STORAGE;
+                              ret = hmem;
+                          }
+                      }
+                      else
+                      {
+                          if ((ptr = HeapAlloc( GetProcessHeap(), heap_flags, size )))
+                          {
+                              header->ptr = ptr;
+                              hlocal_hashtable_add_unlocked( header );
+                              ret = hmem;
+                          }
                       }
                   }
               }
@@ -816,6 +934,7 @@ HLOCAL WINAPI DECLSPEC_HOTPATCH LocalReAlloc( HLOCAL hmem, SIZE_T size, UINT fla
               {
                   if (header->ptr)
                   {
+                      hlocal_hashtable_remove_unlocked( header );
                       HeapFree( GetProcessHeap(), 0, (char *)header->ptr - HLOCAL_STORAGE );
                       header->ptr = NULL;
                   }
