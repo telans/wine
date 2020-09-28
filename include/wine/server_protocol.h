@@ -5869,19 +5869,6 @@ struct set_cursor_reply
 #define SET_CURSOR_NOCLIP 0x10
 
 
-
-struct update_rawinput_devices_request
-{
-    struct request_header __header;
-    /* VARARG(devices,rawinput_devices); */
-    char __pad_12[4];
-};
-struct update_rawinput_devices_reply
-{
-    struct reply_header __header;
-};
-
-
 struct get_rawinput_devices_request
 {
     struct request_header __header;
@@ -5894,6 +5881,19 @@ struct get_rawinput_devices_reply
     /* VARARG(devices,rawinput_devices); */
     char __pad_12[4];
 };
+
+
+struct update_rawinput_devices_request
+{
+    struct request_header __header;
+    /* VARARG(devices,rawinput_devices); */
+    char __pad_12[4];
+};
+struct update_rawinput_devices_reply
+{
+    struct reply_header __header;
+};
+
 
 
 struct create_job_request
@@ -6436,8 +6436,8 @@ enum request
     REQ_alloc_user_handle,
     REQ_free_user_handle,
     REQ_set_cursor,
-    REQ_update_rawinput_devices,
     REQ_get_rawinput_devices,
+    REQ_update_rawinput_devices,
     REQ_create_job,
     REQ_open_job,
     REQ_assign_job,
@@ -6758,8 +6758,8 @@ union generic_request
     struct alloc_user_handle_request alloc_user_handle_request;
     struct free_user_handle_request free_user_handle_request;
     struct set_cursor_request set_cursor_request;
-    struct update_rawinput_devices_request update_rawinput_devices_request;
     struct get_rawinput_devices_request get_rawinput_devices_request;
+    struct update_rawinput_devices_request update_rawinput_devices_request;
     struct create_job_request create_job_request;
     struct open_job_request open_job_request;
     struct assign_job_request assign_job_request;
@@ -7078,8 +7078,8 @@ union generic_reply
     struct alloc_user_handle_reply alloc_user_handle_reply;
     struct free_user_handle_reply free_user_handle_reply;
     struct set_cursor_reply set_cursor_reply;
-    struct update_rawinput_devices_reply update_rawinput_devices_reply;
     struct get_rawinput_devices_reply get_rawinput_devices_reply;
+    struct update_rawinput_devices_reply update_rawinput_devices_reply;
     struct create_job_reply create_job_reply;
     struct open_job_reply open_job_reply;
     struct assign_job_reply assign_job_reply;
@@ -7100,7 +7100,7 @@ union generic_reply
 
 /* ### protocol_version begin ### */
 
-#define SERVER_PROTOCOL_VERSION 606
+#define SERVER_PROTOCOL_VERSION 607
 
 /* ### protocol_version end ### */
 
