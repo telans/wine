@@ -1,6 +1,7 @@
-/* Wine Vulkan loader implementation
+/*
+ * futex-based synchronization objects
  *
- * Copyright 2018 Roderick Colenbrander
+ * Copyright (C) 2018 Zebediah Figura
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,24 +18,17 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdarg.h>
+extern int do_fsync(void);
+extern void fsync_init(void);
+extern unsigned int fsync_alloc_shm( int low, int high );
+extern void fsync_wake_futex( unsigned int shm_idx );
+extern void fsync_clear_futex( unsigned int shm_idx );
+extern void fsync_wake_up( struct object *obj );
+extern void fsync_clear( struct object *obj );
 
-#include "windef.h"
-#include "winbase.h"
+struct fsync;
 
-#include "wine/debug.h"
-
-WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
-
-BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, void *reserved)
-{
-    TRACE("%p, %u, %p\n", hinst, reason, reserved);
-
-    switch (reason)
-    {
-        case DLL_PROCESS_ATTACH:
-            DisableThreadLibraryCalls(hinst);
-            return TRUE;
-    }
-    return TRUE;
-}
+extern const struct object_ops fsync_ops;
+extern void fsync_set_event( struct fsync *fsync );
+extern void fsync_reset_event( struct fsync *fsync );
+extern void fsync_abandon_mutexes( struct thread *thread );

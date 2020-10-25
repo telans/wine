@@ -119,6 +119,7 @@ static const struct object_ops named_pipe_ops =
     NULL,                         /* remove_queue */
     NULL,                         /* signaled */
     NULL,                         /* get_esync_fd */
+    NULL,                         /* get_fsync_idx */
     NULL,                         /* satisfied */
     no_signal,                    /* signal */
     no_get_fd,                    /* get_fd */
@@ -164,6 +165,7 @@ static const struct object_ops pipe_server_ops =
     remove_queue,                 /* remove_queue */
     default_fd_signaled,          /* signaled */
     default_fd_get_esync_fd,      /* get_esync_fd */
+    default_fd_get_fsync_idx,     /* get_fsync_idx */
     no_satisfied,                 /* satisfied */
     no_signal,                    /* signal */
     pipe_end_get_fd,              /* get_fd */
@@ -208,6 +210,7 @@ static const struct object_ops pipe_client_ops =
     remove_queue,                 /* remove_queue */
     default_fd_signaled,          /* signaled */
     default_fd_get_esync_fd,      /* get_esync_fd */
+    default_fd_get_fsync_idx,     /* get_fsync_idx */
     no_satisfied,                 /* satisfied */
     no_signal,                    /* signal */
     pipe_end_get_fd,              /* get_fd */
@@ -256,6 +259,7 @@ static const struct object_ops named_pipe_device_ops =
     NULL,                             /* remove_queue */
     NULL,                             /* signaled */
     NULL,                             /* get_esync_fd */
+    NULL,                             /* get_fsync_idx */
     no_satisfied,                     /* satisfied */
     no_signal,                        /* signal */
     no_get_fd,                        /* get_fd */
@@ -288,6 +292,7 @@ static const struct object_ops named_pipe_device_file_ops =
     remove_queue,                            /* remove_queue */
     default_fd_signaled,                     /* signaled */
     NULL,                                    /* get_esync_fd */
+    NULL,                                    /* get_fsync_idx */
     no_satisfied,                            /* satisfied */
     no_signal,                               /* signal */
     named_pipe_device_file_get_fd,           /* get_fd */

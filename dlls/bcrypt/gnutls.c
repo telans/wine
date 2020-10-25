@@ -322,8 +322,11 @@ static BOOL gnutls_initialize(void)
     }
     if (!(pgnutls_decode_rs_value = dlsym( libgnutls_handle, "gnutls_decode_rs_value" )))
     {
-        WARN("gnutls_decode_rs_value not found\n");
-        pgnutls_decode_rs_value = compat_gnutls_decode_rs_value;
+        if (!(pgnutls_decode_rs_value = dlsym( libgnutls_handle, "_gnutls_decode_ber_rs_raw" )))
+        {
+            WARN("gnutls_decode_rs_value and legacy alternative _gnutls_decode_ber_rs_raw not found\n");
+            pgnutls_decode_rs_value = compat_gnutls_decode_rs_value;
+        }
     }
     if (!(pgnutls_privkey_import_rsa_raw = dlsym( libgnutls_handle, "gnutls_privkey_import_rsa_raw" )))
     {
